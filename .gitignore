@@ -1,0 +1,17 @@
+*.gem
+*.jar
+vendor/
+lib/
+build/
+.gradle/
+Gemfile
+Gemfile.lock
+*.gemspec
+.idea/
+*.iml
+*.class
+.DS_Store
+opencode/
+
+# Local build configuration (set LOGSTASH_CORE_PATH here)
+gradle.properties

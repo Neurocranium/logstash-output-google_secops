@@ -1,0 +1,116 @@
+import java.nio.file.Files
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING
+
+buildscript {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath "org.yaml:snakeyaml:2.2"
+    }
+}
+
+plugins {
+    id 'com.gradleup.shadow' version '9.6.1'
+    id 'java'
+}
+
+
+import org.yaml.snakeyaml.Yaml
+def logstashCoreDir = file(LOGSTASH_CORE_PATH)
+def logstashRoot = logstashCoreDir.parentFile.parentFile.parentFile
+
+def versionsFile = file("${logstashRoot}/versions.yml")
+if (versionsFile.exists()) {
+    gradle.ext.versions = new Yaml().load(versionsFile.text)
+} else {
+    throw new GradleException(
+            "versions.yml not found at ${versionsFile}. " +
+                    "Check that LOGSTASH_CORE_PATH in gradle.properties points to a valid Logstash build.")
+}
+
+apply from: "${logstashRoot}/rubyUtils.gradle"
+
+group                      'chaos.caffeinandsarcasm.lsplugins'
+version                    "${file("VERSION").text.trim()}"
+description                = "Google SecOps output plugin for Logstash"
+pluginInfo.licenses        = ['Apache-2.0']
+pluginInfo.longDescription = "This gem is a Logstash plugin required to be installed on top of the Logstash core pipeline using \$LS_HOME/bin/logstash-plugin install gemname. This gem is not a stand-alone program"
+pluginInfo.authors         = ['Sebastian Klein']
+pluginInfo.email           = ['92733021+Neurocranium@users.noreply.github.com']
+pluginInfo.homepage        = "https://github.com/Neurocranium/logstash-output-google_secops"
+pluginInfo.pluginType      = "output"
+pluginInfo.pluginClass     = "GoogleSecOps"
+pluginInfo.pluginName      = "google_secops"
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenCentral()
+}
+
+shadowJar {
+    archiveClassifier.set('')
+}
+
+dependencies {
+    implementation fileTree(dir: LOGSTASH_CORE_PATH, include: "**/logstash-core.jar")
+
+    implementation 'com.google.auth:google-auth-library-oauth2-http:1.48.0'
+    implementation 'com.google.http-client:google-http-client:2.1.0'
+    implementation 'com.google.http-client:google-http-client-gson:2.1.0'
+
+    implementation 'org.apache.logging.log4j:log4j-api:2.25.4'
+
+    testImplementation 'junit:junit:4.12'
+    testImplementation "org.jruby:jruby-complete:${gradle.ext.versions.jruby.version}"
+    testImplementation 'org.apache.logging.log4j:log4j-core:2.25.4'
+}
+
+clean {
+    delete "${projectDir}/Gemfile"
+    delete "${projectDir}/" + pluginInfo.pluginFullName() + ".gemspec"
+    delete "${projectDir}/lib/"
+    delete "${projectDir}/vendor/"
+    delete fileTree(projectDir).include(pluginInfo.pluginFullName() + "-*.gem")
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+tasks.register("vendor") {
+    dependsOn shadowJar
+    doLast {
+        String vendorPathPrefix = "vendor/jar-dependencies"
+        String projectGroupPath = project.group.replaceAll('\\.', '/')
+        File projectJarFile = file("${vendorPathPrefix}/${projectGroupPath}/${pluginInfo.pluginFullName()}/${project.version}/${pluginInfo.pluginFullName()}-${project.version}.jar")
+        projectJarFile.mkdirs()
+        Files.copy(file("$buildDir/libs/${project.name}-${project.version}.jar").toPath(), projectJarFile.toPath(), REPLACE_EXISTING)
+        validatePluginJar(projectJarFile, project.group)
+    }
+}
+
+tasks.register("generateRubySupportFiles") {
+    doLast {
+        generateRubySupportFilesForPlugin(project.description, project.group, version)
+    }
+}
+
+tasks.register("removeObsoleteJars") {
+    doLast {
+        String namePattern = pluginInfo.pluginFullName()
+        delete fileTree("${projectDir}/vendor").include("**/${namePattern}*.jar").exclude("**/${namePattern}-${version}.jar")
+    }
+}
+
+tasks.register("gem") {
+    dependsOn = [downloadAndInstallJRuby, removeObsoleteJars, vendor, generateRubySupportFiles]
+    doLast {
+        buildGem(projectDir, buildDir, pluginInfo.pluginFullName() + ".gemspec")
+    }
+}
