@@ -1,5 +1,6 @@
 *.gem
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 vendor/
 lib/
 build/
