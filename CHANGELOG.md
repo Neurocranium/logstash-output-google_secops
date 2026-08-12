@@ -1,3 +1,8 @@
+# 0.5.3
+- Add support for configuring the Logstash plugin instance `id`; when omitted,
+  Logstash continues to generate one
+- Document the custom TLS truststore and PEM CA certificate configuration
+
 # 0.5.2
 - Update `google-auth-library-oauth2-http` from 1.30.0 to 1.48.0,
   `google-http-client` from 1.45.3 to 2.1.0, and

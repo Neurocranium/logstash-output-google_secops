@@ -23,7 +23,6 @@ import java.net.ConnectException;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -39,6 +38,8 @@ import java.util.stream.Collectors;
 @LogstashPlugin(name = "google_secops")
 public class GoogleSecOps implements Output {
 
+    static final PluginConfigSpec<String> ID_CONFIG =
+            PluginConfigSpec.stringSetting("id");
     static final PluginConfigSpec<String> PROJECT_ID_CONFIG =
             PluginConfigSpec.stringSetting("project_id", "");
     static final PluginConfigSpec<String> INSTANCE_ID_CONFIG =
@@ -119,7 +120,6 @@ public class GoogleSecOps implements Output {
     private final Logger logger = LogManager.getLogger(GoogleSecOps.class);
     private final SecOpsApiClient client;
     private final CountDownLatch done = new CountDownLatch(1);
-    private volatile boolean stopped = false;
 
     public GoogleSecOps(final String id, final Configuration config, final Context context) {
         this.id = id;
@@ -357,7 +357,7 @@ public class GoogleSecOps implements Output {
     @Override
     public Collection<PluginConfigSpec<?>> configSchema() {
         return List.of(
-                PROJECT_ID_CONFIG, INSTANCE_ID_CONFIG, REGION_CONFIG,
+                ID_CONFIG, PROJECT_ID_CONFIG, INSTANCE_ID_CONFIG, REGION_CONFIG,
                 LOG_TYPE_CONFIG, LOG_TYPE_FIELD_CONFIG, FALLBACK_LOG_TYPE_CONFIG,
                 DATA_FIELD_CONFIG, LOG_ENTRY_TIME_FIELD_CONFIG, COLLECTION_TIME_FIELD_CONFIG,
                 LABELS_FIELD_CONFIG, FORWARDER_ID_CONFIG, SOURCE_FILENAME_CONFIG,
@@ -368,7 +368,6 @@ public class GoogleSecOps implements Output {
 
     @Override
     public void stop() {
-        stopped = true;
         client.shutdown();
         try {
             client.close();

@@ -43,7 +43,7 @@ public class SecOpsApiClient implements AutoCloseable {
     private final int maxRetries;
     private final String forwarderId;
     private final String sourceFilename;
-    private volatile boolean stopped;
+    private volatile boolean stopped = false;
 
     public SecOpsApiClient(GoogleCredentials credentials, String region,
                            String projectId, String instanceId,
