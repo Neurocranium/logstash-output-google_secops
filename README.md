@@ -328,16 +328,27 @@ within the 4 MB uncompressed limit and can be parsed directly by log processors.
 
 ```
 logstash-output-google_secops/
-├── build.gradle                    # Build configuration
-├── VERSION                         # Plugin version
-├── gradle.properties               # Set LOGSTASH_CORE_PATH here
-├── src/main/java/chaos/caffeinandsarcasm/lsplugins/
-│   ├── GoogleSecOps.java           # Main plugin class
-│   ├── LogEntry.java               # Log entry model
-│   └── client/
-│       ├── SecOpsApiClient.java    # HTTP client with auth + retry
-│       └── StatsCollector.java     # Per-batch statistics collector
-└── README.md
+├── build.gradle                              # Build and gem packaging configuration
+├── gradle.properties                         # Local LOGSTASH_CORE_PATH configuration
+├── gradle/wrapper/                           # Gradle wrapper files
+├── src/
+│   ├── main/java/chaos/caffeinandsarcasm/lsplugins/
+│   │   ├── GoogleSecOps.java                 # Main Logstash output plugin
+│   │   ├── LogEntry.java                     # SecOps log entry model
+│   │   ├── TimestampNormalizer.java          # RFC 3339 validation and UTC normalization
+│   │   └── client/
+│   │       ├── EndpointSelector.java         # Regional fallback and cooldown state
+│   │       ├── SecOpsApiClient.java          # HTTP client, batching, and retries
+│   │       └── StatsCollector.java           # Compact JSON batch statistics
+│   └── test/java/chaos/caffeinandsarcasm/lsplugins/
+│       ├── TimestampNormalizerTest.java
+│       └── client/
+│           ├── EndpointSelectorTest.java
+│           └── StatsCollectorTest.java
+├── CHANGELOG.md
+├── LICENSE
+├── README.md
+└── VERSION                                   # Plugin version
 ```
 
 ### Prerequisites
