@@ -22,8 +22,6 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.SocketException;
 import java.net.UnknownHostException;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -80,6 +78,8 @@ public class GoogleSecOps implements Output {
             PluginConfigSpec.stringSetting("ssl_truststore_type", "JKS");
     static final PluginConfigSpec<String> SSL_CA_CERT_PATH_CONFIG =
             PluginConfigSpec.stringSetting("ssl_ca_cert_path", "");
+    static final PluginConfigSpec<String> SSL_VERIFICATION_MODE_CONFIG =
+            PluginConfigSpec.stringSetting("ssl_verification_mode", "full");
 
     private static final Set<String> VALID_REGIONS = Set.of(
             "us", "eu", "europe",
@@ -142,6 +142,7 @@ public class GoogleSecOps implements Output {
         String forwarderId = config.get(FORWARDER_ID_CONFIG);
         String sourceFilename = config.get(SOURCE_FILENAME_CONFIG);
         String saKeyPath = config.get(SA_KEY_PATH_CONFIG);
+        String sslVerificationMode = config.get(SSL_VERIFICATION_MODE_CONFIG);
 
         if (projectId == null || projectId.isEmpty()) {
             throw new IllegalArgumentException("'project_id' is required");
@@ -162,6 +163,11 @@ public class GoogleSecOps implements Output {
                     "'region' must be one of the supported Chronicle API regions. See README for the full list. (got \""
                             + region + "\")");
         }
+        if (!"full".equals(sslVerificationMode) && !"certificate".equals(sslVerificationMode)) {
+            throw new IllegalArgumentException(
+                    "'ssl_verification_mode' must be either 'full' or 'certificate' (got \""
+                            + sslVerificationMode + "\")");
+        }
 
         try {
             GoogleCredentials credentials;
@@ -180,7 +186,8 @@ public class GoogleSecOps implements Output {
                     config.get(SSL_TRUSTSTORE_PATH_CONFIG),
                     config.get(SSL_TRUSTSTORE_PASSWORD_CONFIG),
                     config.get(SSL_TRUSTSTORE_TYPE_CONFIG),
-                    config.get(SSL_CA_CERT_PATH_CONFIG));
+                    config.get(SSL_CA_CERT_PATH_CONFIG),
+                    sslVerificationMode);
 
         } catch (IOException e) {
             throw new RuntimeException(buildCredentialErrorMessage(e, saKeyPath), e);
@@ -283,14 +290,28 @@ public class GoogleSecOps implements Output {
             return null;
         }
 
-        String logEntryTime = extractTimestamp(event, logEntryTimeField);
-        if (logEntryTime == null) {
-            logEntryTime = formatInstant(event.getEventTimestamp());
-        }
+        String logEntryTime;
+        String collectionTime;
+        try {
+            logEntryTime = extractTimestamp(event, logEntryTimeField);
+            if (logEntryTime == null) {
+                logEntryTime = normalizeTimestamp(event.getEventTimestamp(), "@timestamp");
+            }
+            if (logEntryTime == null) {
+                logger.warn("Dropping event because neither '{}' nor the Logstash event timestamp contains a timestamp.",
+                        logEntryTimeField);
+                return null;
+            }
 
-        String collectionTime = extractTimestamp(event, collectionTimeField);
-        if (collectionTime == null) {
-            collectionTime = logEntryTime;
+            collectionTime = extractTimestamp(event, collectionTimeField);
+            if (collectionTime == null) {
+                collectionTime = logEntryTime;
+            }
+        } catch (InvalidTimestampException e) {
+            logger.warn("Dropping event because timestamp field '{}' contains invalid value '{}'. Timestamps must use "
+                            + "RFC 3339 format and end with Z or a valid +/-HH:MM timezone offset.",
+                    e.getField(), abbreviateForLog(e.getValue()));
+            return null;
         }
 
         String resolvedLogType = resolveLogType(event);
@@ -311,23 +332,47 @@ public class GoogleSecOps implements Output {
 
     private String extractTimestamp(Event event, String field) {
         if ("@timestamp".equals(field)) {
-            return formatInstant(event.getEventTimestamp());
+            return normalizeTimestamp(event.getEventTimestamp(), field);
         }
         Object value = event.getField(field);
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof Instant) {
-            return formatInstant((Instant) value);
-        }
-        return value.toString();
+        return normalizeTimestamp(value, field);
     }
 
-    private static String formatInstant(Instant instant) {
-        if (instant == null) {
-            return null;
+    private static String normalizeTimestamp(Object value, String field) {
+        try {
+            return TimestampNormalizer.normalize(value);
+        } catch (IllegalArgumentException e) {
+            throw new InvalidTimestampException(field, value, e);
         }
-        return DateTimeFormatter.ISO_INSTANT.format(instant);
+    }
+
+    private static String abbreviateForLog(Object value) {
+        String text = String.valueOf(value)
+                .replace("\\", "\\\\")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t");
+        int maxLength = 128;
+        return text.length() <= maxLength ? text : text.substring(0, maxLength) + "...";
+    }
+
+    private static final class InvalidTimestampException extends IllegalArgumentException {
+        private final String field;
+        private final Object value;
+
+        private InvalidTimestampException(String field, Object value, Throwable cause) {
+            super(cause);
+            this.field = field;
+            this.value = value;
+        }
+
+        private String getField() {
+            return field;
+        }
+
+        private Object getValue() {
+            return value;
+        }
     }
 
     private String resolveLogType(Event event) {
@@ -363,7 +408,8 @@ public class GoogleSecOps implements Output {
                 LABELS_FIELD_CONFIG, FORWARDER_ID_CONFIG, SOURCE_FILENAME_CONFIG,
                 SA_KEY_PATH_CONFIG, BATCH_SIZE_CONFIG, MAX_RETRIES_CONFIG, COLLECT_STATS_CONFIG,
                 SSL_TRUSTSTORE_PATH_CONFIG, SSL_TRUSTSTORE_PASSWORD_CONFIG,
-                SSL_TRUSTSTORE_TYPE_CONFIG, SSL_CA_CERT_PATH_CONFIG);
+                SSL_TRUSTSTORE_TYPE_CONFIG, SSL_CA_CERT_PATH_CONFIG,
+                SSL_VERIFICATION_MODE_CONFIG);
     }
 
     @Override

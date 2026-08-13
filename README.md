@@ -116,6 +116,7 @@ output {
         ssl_truststore_password => "changeit"
         ssl_truststore_type     => "JKS"
         # ssl_ca_cert_path      => "/etc/logstash/certs/custom-ca.pem"
+        ssl_verification_mode   => "full"
     }
 }
 ```
@@ -145,6 +146,7 @@ output {
 | `ssl_truststore_password` | string | no | `"changeit"` | Password used to load the custom truststore |
 | `ssl_truststore_type` | string | no | `"JKS"` | Java truststore type, such as `JKS` or `PKCS12` |
 | `ssl_ca_cert_path` | path | no | — | Path to a PEM file containing custom trusted CA certificates |
+| `ssl_verification_mode` | string | no | `"full"` | TLS verification mode: `full` verifies the certificate chain and hostname; `certificate` verifies only the certificate chain |
 
 ## TLS Configuration
 
@@ -158,6 +160,39 @@ trust can be configured in either of the following ways:
 
 If both `ssl_truststore_path` and `ssl_ca_cert_path` are configured, the Java
 truststore takes precedence.
+
+The default `ssl_verification_mode => "full"` validates both the certificate
+chain and the endpoint hostname. Use `ssl_verification_mode => "certificate"`
+only when the certificate is issued by a trusted CA but its subject alternative
+names do not cover the configured SecOps endpoint. Certificate mode continues
+to validate the certificate chain; it does not trust arbitrary certificates.
+
+### Hostname verification errors
+
+An error such as the following indicates that certificate-chain validation
+succeeded but hostname verification failed:
+
+```text
+(certificate_unknown) No subject alternative DNS name matching chronicle.<region>.rep.googleapis.com found.
+```
+
+First confirm that `region` selects the correct Google SecOps endpoint and that
+the expected CA chain is configured. If the endpoint is correct and the trusted
+certificate genuinely lacks the required DNS name, configure:
+
+```ruby
+ssl_verification_mode => "certificate"
+```
+
+This disables only hostname matching and produces a startup warning. Because it
+weakens endpoint identity verification, keep `full` mode wherever possible.
+It does not affect HTTP responses and cannot resolve `404 Not Found` errors.
+
+The plugin sends requests to the regional Chronicle ingestion endpoint:
+
+```text
+https://chronicle.<region>.rep.googleapis.com/v1
+```
 
 ## Supported Regions
 
@@ -232,35 +267,53 @@ Events with different log types are sent in separate API calls.
 ## Timestamp Handling
 
 - `log_entry_time_field`: Defaults to `@timestamp`. Use any event field
-  containing a valid RFC 3339 timestamp.
+  containing a valid RFC 3339 timestamp with a `Z` suffix or an explicit
+  timezone offset such as `+02:00`.
 - `collection_time_field`: Defaults to `[event][created]` (ECS convention).
   Falls back to the `logEntryTime` value if the field is missing, ensuring
   `collectionTime >= logEntryTime` as required by the API.
+
+Both timestamp fields are validated before events are batched or sent. Valid
+offset timestamps are normalized to their equivalent UTC value ending in `Z`.
+An explicitly configured timestamp that is empty, malformed, lacks a timezone,
+or falls outside the protobuf Timestamp range is rejected locally: the plugin
+logs a warning and drops only that event. Missing values retain the fallback
+behavior described above.
 
 ## Retry Strategy
 
 | Status | Behavior |
 |---|---|
 | **200-299** | Success |
+| **404 from preferred regional endpoint** | Immediately retry through `https://<region>-chronicle.googleapis.com`. If successful, use that endpoint and probe the preferred endpoint again after 1 hour, 24 hours, and 7 days. |
 | **429** | Read `Retry-After` header (default 300s). Block and wait once, retry. If still 429, log and drop. |
-| **400-499 (non-429)** | Log error and drop batch (fatal client error) |
+| **400-499 (non-404/429)** | Log error and drop batch (fatal client error) |
 | **500-599** | Exponential backoff (1s, 2s, 4s) up to `max_retries`, then log and drop |
 | **Timeout / IO error** | Exponential backoff up to `max_retries`, then log and drop |
 
+The preferred ingestion endpoint is
+`https://chronicle.<region>.rep.googleapis.com/v1`. If it returns 404, the
+plugin retries the same batch through the global-routed regional endpoint,
+`https://<region>-chronicle.googleapis.com/v1`. A successful fallback is shared
+by all workers of that plugin instance. No timer thread is created: one worker
+opportunistically probes the preferred endpoint after 1 hour, then after 24
+hours and 7 days if routing remains unavailable. Any non-2xx response or IO
+failure during a probe is logged separately and the batch is retried through
+the known-working endpoint. After the third failed probe, the fallback remains
+active until the plugin restarts.
+
 ## Stats Collection
 
-When `collect_stats => true`, the plugin prints statistics for every `output()` call:
+When `collect_stats => true`, the plugin prints one compact JSON statistics
+object for every `output()` call. Payload sizes are exact byte counts:
 
-```
-[google_secops] Batch stats (257 events, 2 log type group(s)):
-  OKTA: 2 API call(s), 150 events, 132.0 KB total
-    [1/2] 100 ev, 65.0 KB, 200 (120ms)
-    [2/2] 50 ev, 33.0 KB, 200 (85ms)
-  WINEVTLOG_XML: 1 API call(s), 107 events, 67.0 KB total
-    [1/1] 107 ev, 67.0 KB, 200 (95ms)
+```json
+{"events":57,"bytes":57446,"log_types":[{"name":"PAN_FIREWALL","events":38,"bytes":37990,"calls":[{"events":38,"bytes":37990,"status":200,"duration_ms":134}]},{"name":"FORTINET_FIREWALL","events":19,"bytes":19456,"calls":[{"events":19,"bytes":19456,"status":200,"duration_ms":104}]}]}
 ```
 
-This helps tune `batch_size` to stay within the 4 MB uncompressed limit.
+The surrounding timestamp, logger name, pipeline, and plugin ID remain part of
+Logstash's normal log envelope. This output helps tune `batch_size` to stay
+within the 4 MB uncompressed limit and can be parsed directly by log processors.
 
 ## API Limits
 

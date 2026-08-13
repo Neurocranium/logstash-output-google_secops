@@ -1,3 +1,20 @@
+# 0.5.6
+- Validate and UTC-normalize `logEntryTime` and `collectionTime` before batching,
+  dropping malformed events locally instead of sending invalid timestamps
+- Emit optional per-batch statistics as a compact JSON object with exact byte
+  counts for machine-friendly log processing
+
+# 0.5.5
+- Fall back to the global-routed regional Chronicle endpoint when the preferred
+  `.rep.googleapis.com` endpoint returns 404
+- Probe the preferred endpoint again after 1 hour, 24 hours, and 7 days using a
+  lock-free per-plugin cooldown state
+
+# 0.5.4
+- Add opt-in `ssl_verification_mode => "certificate"` to retain certificate-chain
+  validation while disabling hostname matching for incompatible TLS endpoints
+- Document troubleshooting for subject alternative DNS name mismatch errors
+
 # 0.5.3
 - Add support for configuring the Logstash plugin instance `id`; when omitted,
   Logstash continues to generate one

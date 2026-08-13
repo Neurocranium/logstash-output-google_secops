@@ -38,7 +38,7 @@ public class SecOpsApiClient implements AutoCloseable {
     private final HttpTransport transport;
     private final HttpRequestFactory requestFactory;
     private final Gson gson;
-    private final String baseUrl;
+    private final EndpointSelector endpointSelector;
     private final int batchSize;
     private final int maxRetries;
     private final String forwarderId;
@@ -50,19 +50,26 @@ public class SecOpsApiClient implements AutoCloseable {
                            int batchSize, int maxRetries,
                            String forwarderId, String sourceFilename,
                            String sslTruststorePath, String sslTruststorePassword,
-                           String sslTruststoreType, String sslCaCertPath) throws IOException {
+                           String sslTruststoreType, String sslCaCertPath,
+                           String sslVerificationMode) throws IOException {
+        NetHttpTransport.Builder transportBuilder = new NetHttpTransport.Builder();
         if (sslTruststorePath != null && !sslTruststorePath.isEmpty()) {
-            this.transport = buildTransportWithTruststore(
+            configureTruststore(
+                    transportBuilder,
                     sslTruststorePath, sslTruststorePassword, sslTruststoreType);
         } else if (sslCaCertPath != null && !sslCaCertPath.isEmpty()) {
-            this.transport = buildTransportWithCaCert(sslCaCertPath);
-        } else {
-            this.transport = new NetHttpTransport();
+            configureCaCert(transportBuilder, sslCaCertPath);
         }
+        if ("certificate".equals(sslVerificationMode)) {
+            transportBuilder.setHostnameVerifier((hostname, session) -> true);
+            logger.warn("TLS certificate-only verification is enabled. Certificate chain trust will be validated, "
+                    + "but hostname identity will not be verified.");
+        }
+        this.transport = transportBuilder.build();
         HttpCredentialsAdapter credentialsAdapter = new HttpCredentialsAdapter(credentials);
         this.requestFactory = transport.createRequestFactory(credentialsAdapter);
         this.gson = new Gson();
-        this.baseUrl = String.format("https://chronicle.%s.rep.googleapis.com/v1", region);
+        this.endpointSelector = new EndpointSelector(region);
         this.batchSize = batchSize;
         this.maxRetries = maxRetries;
         this.forwarderId = forwarderId;
@@ -99,22 +106,25 @@ public class SecOpsApiClient implements AutoCloseable {
     }
 
     private void sendWithRetry(String parent, List<LogEntry> batch, StatsCollector stats) {
-        String url = baseUrl + "/" + parent + "/logs:import";
+        EndpointSelector.Route route = endpointSelector.selectRoute();
+        String url = buildImportUrl(route.baseUrl(), parent);
+        boolean activatingGlobalFallback = false;
         long startTime = System.currentTimeMillis();
+        byte[] bodyBytes = buildRequestBody(batch);
 
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        int attempt = 0;
+        while (attempt <= maxRetries) {
             if (stopped) {
                 return;
             }
             try {
-                byte[] bodyBytes = buildRequestBody(batch);
-
                 HttpRequest request = buildPostRequest(url, bodyBytes);
                 HttpResponse response = request.execute();
                 int statusCode = response.getStatusCode();
                 long durationMs = System.currentTimeMillis() - startTime;
 
                 if (statusCode >= 200 && statusCode < 300) {
+                    handleEndpointSuccess(route, activatingGlobalFallback);
                     stats.recordCall(resolveLogTypeFromLogs(batch),
                             batch.size(), bodyBytes.length, statusCode, durationMs);
                     response.ignore();
@@ -123,6 +133,26 @@ public class SecOpsApiClient implements AutoCloseable {
 
                 String responseBody = response.parseAsString();
                 response.disconnect();
+
+                if (route.isProbe()) {
+                    logProbeFailure(endpointSelector.preferredProbeFailed(), "HTTP " + statusCode, responseBody);
+                    route = endpointSelector.globalRoute();
+                    url = buildImportUrl(route.baseUrl(), parent);
+                    activatingGlobalFallback = false;
+                    attempt = 0;
+                    continue;
+                }
+
+                if (route.isRegional() && statusCode == 404) {
+                    logger.warn("Preferred regional Chronicle endpoint returned 404 for {}. Retrying this batch through "
+                            + "the global-routed endpoint {}. Response: {}",
+                            url, endpointSelector.globalRoute().baseUrl(), responseBody);
+                    route = endpointSelector.globalRoute();
+                    url = buildImportUrl(route.baseUrl(), parent);
+                    activatingGlobalFallback = true;
+                    attempt = 0;
+                    continue;
+                }
 
                 if (statusCode == 429) {
                     long retryAfterSeconds = RETRY_AFTER_DEFAULT_SECONDS;
@@ -152,6 +182,7 @@ public class SecOpsApiClient implements AutoCloseable {
                     long retryDurationMs = System.currentTimeMillis() - startTime;
 
                     if (retryStatusCode >= 200 && retryStatusCode < 300) {
+                        handleEndpointSuccess(route, activatingGlobalFallback);
                         stats.recordCall(resolveLogTypeFromLogs(batch),
                                 batch.size(), bodyBytes.length, retryStatusCode, retryDurationMs);
                         retryResponse.disconnect();
@@ -196,7 +227,18 @@ public class SecOpsApiClient implements AutoCloseable {
                     }
                 }
 
+                attempt++;
+
             } catch (SocketTimeoutException e) {
+                if (route.isProbe()) {
+                    logProbeFailure(endpointSelector.preferredProbeFailed(),
+                            "timeout: " + e.getMessage(), null);
+                    route = endpointSelector.globalRoute();
+                    url = buildImportUrl(route.baseUrl(), parent);
+                    activatingGlobalFallback = false;
+                    attempt = 0;
+                    continue;
+                }
                 long durationMs = System.currentTimeMillis() - startTime;
                 if (attempt < maxRetries) {
                     long delayMs = getBackoffDelay(attempt);
@@ -207,6 +249,7 @@ public class SecOpsApiClient implements AutoCloseable {
                                 batch.size(), 0, 0, durationMs);
                         return;
                     }
+                    attempt++;
                 } else {
                     logger.warn("Timeout for {}. Max retries exhausted. Dropping batch: {}",
                             url, e.getMessage());
@@ -215,6 +258,15 @@ public class SecOpsApiClient implements AutoCloseable {
                     return;
                 }
             } catch (IOException e) {
+                if (route.isProbe()) {
+                    logProbeFailure(endpointSelector.preferredProbeFailed(),
+                            "IO error: " + e.getMessage(), null);
+                    route = endpointSelector.globalRoute();
+                    url = buildImportUrl(route.baseUrl(), parent);
+                    activatingGlobalFallback = false;
+                    attempt = 0;
+                    continue;
+                }
                 long durationMs = System.currentTimeMillis() - startTime;
                 if (attempt < maxRetries) {
                     long delayMs = getBackoffDelay(attempt);
@@ -225,6 +277,7 @@ public class SecOpsApiClient implements AutoCloseable {
                                 batch.size(), 0, 0, durationMs);
                         return;
                     }
+                    attempt++;
                 } else {
                     logger.warn("IO error for {}. Max retries exhausted. Dropping batch: {}",
                             url, e.getMessage());
@@ -234,6 +287,44 @@ public class SecOpsApiClient implements AutoCloseable {
                 }
             }
         }
+    }
+
+    private static String buildImportUrl(String baseUrl, String parent) {
+        return baseUrl + "/" + parent + "/logs:import";
+    }
+
+    private void handleEndpointSuccess(EndpointSelector.Route route, boolean activatingGlobalFallback) {
+        if (route.isProbe() && endpointSelector.preferredProbeSucceeded()) {
+            logger.warn("Regional Chronicle endpoint routing is available again. Restoring preferred endpoint {}.",
+                    route.baseUrl());
+        } else if (activatingGlobalFallback && endpointSelector.activateGlobalAfterFallback()) {
+            logger.warn("Regional Chronicle endpoint routing appears unstable. Using global-routed endpoint {} "
+                    + "after the preferred endpoint returned 404. The preferred endpoint will be probed again in 1 hour.",
+                    route.baseUrl());
+        }
+    }
+
+    private void logProbeFailure(EndpointSelector.ProbeFailure failure, String reason, String responseBody) {
+        if (!failure.isApplied()) {
+            return;
+        }
+        String response = responseBody == null || responseBody.isEmpty() ? "" : " Response: " + responseBody;
+        if (failure.isPermanent()) {
+            logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
+                    + "the global-routed endpoint permanently for this plugin instance; no further probes will be made.{}",
+                    reason, response);
+        } else {
+            logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
+                    + "the global-routed endpoint; the next probe will run after {}.{}",
+                    reason, formatDuration(failure.retryAfter()), response);
+        }
+    }
+
+    private static String formatDuration(java.time.Duration duration) {
+        if (duration.toDays() > 0) {
+            return duration.toDays() + (duration.toDays() == 1 ? " day" : " days");
+        }
+        return duration.toHours() + (duration.toHours() == 1 ? " hour" : " hours");
     }
 
     private HttpRequest buildPostRequest(String url, byte[] bodyBytes) throws IOException {
@@ -316,26 +407,23 @@ public class SecOpsApiClient implements AutoCloseable {
         return entries.get(0).getLogType();
     }
 
-    private static NetHttpTransport buildTransportWithTruststore(
-            String truststorePath, String truststorePassword, String truststoreType) throws IOException {
+    private static void configureTruststore(
+            NetHttpTransport.Builder builder, String truststorePath,
+            String truststorePassword, String truststoreType) throws IOException {
         try {
             KeyStore trustStore = KeyStore.getInstance(truststoreType);
             try (InputStream in = new FileInputStream(truststorePath)) {
                 trustStore.load(in, truststorePassword.toCharArray());
             }
-            return new NetHttpTransport.Builder()
-                    .trustCertificates(trustStore)
-                    .build();
+            builder.trustCertificates(trustStore);
         } catch (Exception e) {
             throw new IOException("Failed to initialize custom truststore: " + e.getMessage(), e);
         }
     }
 
-    private static NetHttpTransport buildTransportWithCaCert(String caCertPath) throws IOException {
+    private static void configureCaCert(NetHttpTransport.Builder builder, String caCertPath) throws IOException {
         try (InputStream in = new FileInputStream(caCertPath)) {
-            return new NetHttpTransport.Builder()
-                    .trustCertificatesFromStream(in)
-                    .build();
+            builder.trustCertificatesFromStream(in);
         } catch (Exception e) {
             throw new IOException("Failed to initialize CA certificate: " + e.getMessage(), e);
         }

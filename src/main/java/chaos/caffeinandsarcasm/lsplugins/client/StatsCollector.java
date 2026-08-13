@@ -1,13 +1,17 @@
 package chaos.caffeinandsarcasm.lsplugins.client;
 
+import com.google.gson.Gson;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 public class StatsCollector {
+
+    private static final Gson GSON = new Gson();
 
     private final Logger logger = LogManager.getLogger(StatsCollector.class);
     private final boolean enabled;
@@ -25,8 +29,15 @@ public class StatsCollector {
     }
 
     public void printSummary(Map<String, List<?>> groups) {
+        String summary = buildSummaryJson(groups);
+        if (summary != null) {
+            logger.info(summary);
+        }
+    }
+
+    String buildSummaryJson(Map<String, List<?>> groups) {
         if (!enabled || calls.isEmpty()) {
-            return;
+            return null;
         }
 
         int totalEvents = 0;
@@ -34,54 +45,44 @@ public class StatsCollector {
             totalEvents += list.size();
         }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append(System.lineSeparator());
-        sb.append("[google_secops] Batch stats (").append(totalEvents)
-                .append(" events, ").append(groups.size()).append(" log type group(s)):");
-        sb.append(System.lineSeparator());
-
         Map<String, List<ApiCallStat>> byType = new LinkedHashMap<>();
+        long totalBytes = 0;
         for (ApiCallStat stat : calls) {
             byType.computeIfAbsent(stat.logType, k -> new ArrayList<>()).add(stat);
+            totalBytes += stat.payloadBytes;
         }
 
+        List<Map<String, Object>> logTypes = new ArrayList<>();
         for (Map.Entry<String, List<ApiCallStat>> entry : byType.entrySet()) {
-            String logType = entry.getKey();
             List<ApiCallStat> typeCalls = entry.getValue();
-            int totalEv = 0;
-            long totalBytes = 0;
-            for (ApiCallStat s : typeCalls) {
-                totalEv += s.eventCount;
-                totalBytes += s.payloadBytes;
-            }
-            sb.append("  ").append(logType).append(": ")
-                    .append(typeCalls.size()).append(" API call(s), ")
-                    .append(totalEv).append(" events, ")
-                    .append(formatBytes(totalBytes)).append(" total");
-            sb.append(System.lineSeparator());
+            int typeEvents = 0;
+            long typeBytes = 0;
+            List<Map<String, Object>> callObjects = new ArrayList<>();
+            for (ApiCallStat stat : typeCalls) {
+                typeEvents += stat.eventCount;
+                typeBytes += stat.payloadBytes;
 
-            for (int i = 0; i < typeCalls.size(); i++) {
-                ApiCallStat s = typeCalls.get(i);
-                sb.append("    [").append(i + 1).append("/").append(typeCalls.size()).append("] ")
-                        .append(s.eventCount).append(" ev, ")
-                        .append(formatBytes(s.payloadBytes)).append(", ")
-                        .append(s.statusCode).append(" (")
-                        .append(s.durationMs).append("ms)");
-                sb.append(System.lineSeparator());
+                Map<String, Object> call = new LinkedHashMap<>();
+                call.put("events", stat.eventCount);
+                call.put("bytes", stat.payloadBytes);
+                call.put("status", stat.statusCode);
+                call.put("duration_ms", stat.durationMs);
+                callObjects.add(call);
             }
+
+            Map<String, Object> logType = new LinkedHashMap<>();
+            logType.put("name", entry.getKey());
+            logType.put("events", typeEvents);
+            logType.put("bytes", typeBytes);
+            logType.put("calls", callObjects);
+            logTypes.add(logType);
         }
 
-        logger.info(sb.toString());
-    }
-
-    private static String formatBytes(long bytes) {
-        if (bytes < 1024) {
-            return bytes + " B";
-        } else if (bytes < 1024 * 1024) {
-            return String.format("%.1f KB", bytes / 1024.0);
-        } else {
-            return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
-        }
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("events", totalEvents);
+        summary.put("bytes", totalBytes);
+        summary.put("log_types", logTypes);
+        return GSON.toJson(summary);
     }
 
     private static class ApiCallStat {
