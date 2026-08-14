@@ -1,3 +1,10 @@
+# 0.5.7
+- Add the rounded-up average event size in bytes to per-log-type batch statistics
+- Remove verbose HTTP response bodies from regional endpoint fallback and
+  cooldown probe warnings
+- Add batch-splitting guidance to warning messages and document how plugin
+  `batch_size` should relate to Logstash's `pipeline.batch.size`
+
 # 0.5.6
 - Validate and UTC-normalize `logEntryTime` and `collectionTime` before batching,
   dropping malformed events locally instead of sending invalid timestamps

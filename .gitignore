@@ -13,6 +13,7 @@ Gemfile.lock
 *.class
 .DS_Store
 opencode/
+.vscode/
 
 # Local build configuration (set LOGSTASH_CORE_PATH here)
 gradle.properties

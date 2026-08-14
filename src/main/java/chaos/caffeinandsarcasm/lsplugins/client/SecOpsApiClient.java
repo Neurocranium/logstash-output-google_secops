@@ -99,7 +99,8 @@ public class SecOpsApiClient implements AutoCloseable {
             return;
         }
         int mid = entries.size() / 2;
-        logger.warn("Batch of {} events is {} bytes, exceeding the {} byte limit by {} bytes. Splitting into smaller batches.",
+        logger.warn("Batch of {} events is {} bytes, exceeding the {} byte limit by {} bytes. Splitting into smaller "
+                        + "batches. If this occurs repeatedly, consider lowering batch_size.",
                 entries.size(), body.length, MAX_BATCH_BYTES, body.length - MAX_BATCH_BYTES);
         splitAndSend(parent, entries.subList(0, mid), stats);
         splitAndSend(parent, entries.subList(mid, entries.size()), stats);
@@ -135,7 +136,7 @@ public class SecOpsApiClient implements AutoCloseable {
                 response.disconnect();
 
                 if (route.isProbe()) {
-                    logProbeFailure(endpointSelector.preferredProbeFailed(), "HTTP " + statusCode, responseBody);
+                    logProbeFailure(endpointSelector.preferredProbeFailed(), "HTTP " + statusCode);
                     route = endpointSelector.globalRoute();
                     url = buildImportUrl(route.baseUrl(), parent);
                     activatingGlobalFallback = false;
@@ -145,8 +146,8 @@ public class SecOpsApiClient implements AutoCloseable {
 
                 if (route.isRegional() && statusCode == 404) {
                     logger.warn("Preferred regional Chronicle endpoint returned 404 for {}. Retrying this batch through "
-                            + "the global-routed endpoint {}. Response: {}",
-                            url, endpointSelector.globalRoute().baseUrl(), responseBody);
+                            + "the global-routed endpoint {}.",
+                            url, endpointSelector.globalRoute().baseUrl());
                     route = endpointSelector.globalRoute();
                     url = buildImportUrl(route.baseUrl(), parent);
                     activatingGlobalFallback = true;
@@ -232,7 +233,7 @@ public class SecOpsApiClient implements AutoCloseable {
             } catch (SocketTimeoutException e) {
                 if (route.isProbe()) {
                     logProbeFailure(endpointSelector.preferredProbeFailed(),
-                            "timeout: " + e.getMessage(), null);
+                            "timeout: " + e.getMessage());
                     route = endpointSelector.globalRoute();
                     url = buildImportUrl(route.baseUrl(), parent);
                     activatingGlobalFallback = false;
@@ -260,7 +261,7 @@ public class SecOpsApiClient implements AutoCloseable {
             } catch (IOException e) {
                 if (route.isProbe()) {
                     logProbeFailure(endpointSelector.preferredProbeFailed(),
-                            "IO error: " + e.getMessage(), null);
+                            "IO error: " + e.getMessage());
                     route = endpointSelector.globalRoute();
                     url = buildImportUrl(route.baseUrl(), parent);
                     activatingGlobalFallback = false;
@@ -304,19 +305,18 @@ public class SecOpsApiClient implements AutoCloseable {
         }
     }
 
-    private void logProbeFailure(EndpointSelector.ProbeFailure failure, String reason, String responseBody) {
+    private void logProbeFailure(EndpointSelector.ProbeFailure failure, String reason) {
         if (!failure.isApplied()) {
             return;
         }
-        String response = responseBody == null || responseBody.isEmpty() ? "" : " Response: " + responseBody;
         if (failure.isPermanent()) {
             logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
-                    + "the global-routed endpoint permanently for this plugin instance; no further probes will be made.{}",
-                    reason, response);
+                    + "the global-routed endpoint permanently for this plugin instance; no further probes will be made.",
+                    reason);
         } else {
             logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
-                    + "the global-routed endpoint; the next probe will run after {}.{}",
-                    reason, formatDuration(failure.retryAfter()), response);
+                    + "the global-routed endpoint; the next probe will run after {}.",
+                    reason, formatDuration(failure.retryAfter()));
         }
     }
 

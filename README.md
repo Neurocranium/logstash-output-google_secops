@@ -148,6 +148,12 @@ output {
 | `ssl_ca_cert_path` | path | no | — | Path to a PEM file containing custom trusted CA certificates |
 | `ssl_verification_mode` | string | no | `"full"` | TLS verification mode: `full` verifies the certificate chain and hostname; `certificate` verifies only the certificate chain |
 
+Set `batch_size` greater than or equal to Logstash's `pipeline.batch.size` for
+the pipeline using this output plugin. If `batch_size` is lower, a large
+Logstash pipeline batch may be split unexpectedly across multiple SecOps API
+calls. Requests that exceed the 4 MB uncompressed payload limit are still split
+regardless of these settings.
+
 ## TLS Configuration
 
 By default, the plugin uses the JVM's standard trusted CA certificates. Custom
@@ -305,10 +311,11 @@ active until the plugin restarts.
 ## Stats Collection
 
 When `collect_stats => true`, the plugin prints one compact JSON statistics
-object for every `output()` call. Payload sizes are exact byte counts:
+object for every `output()` call. Payload sizes are exact byte counts, and each
+per-log-type average is rounded up to the next whole byte:
 
 ```json
-{"events":57,"bytes":57446,"log_types":[{"name":"PAN_FIREWALL","events":38,"bytes":37990,"calls":[{"events":38,"bytes":37990,"status":200,"duration_ms":134}]},{"name":"FORTINET_FIREWALL","events":19,"bytes":19456,"calls":[{"events":19,"bytes":19456,"status":200,"duration_ms":104}]}]}
+{"events":57,"bytes":57446,"log_types":[{"name":"PAN_FIREWALL","events":38,"bytes":37990,"avg_event_bytes":1000,"calls":[{"events":38,"bytes":37990,"status":200,"duration_ms":134}]},{"name":"FORTINET_FIREWALL","events":19,"bytes":19456,"avg_event_bytes":1024,"calls":[{"events":19,"bytes":19456,"status":200,"duration_ms":104}]}]}
 ```
 
 The surrounding timestamp, logger name, pipeline, and plugin ID remain part of

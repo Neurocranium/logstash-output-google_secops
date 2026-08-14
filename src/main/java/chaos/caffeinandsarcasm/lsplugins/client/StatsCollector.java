@@ -74,6 +74,10 @@ public class StatsCollector {
             logType.put("name", entry.getKey());
             logType.put("events", typeEvents);
             logType.put("bytes", typeBytes);
+            long averageEventBytes = typeEvents == 0
+                    ? 0
+                    : typeBytes / typeEvents + (typeBytes % typeEvents == 0 ? 0 : 1);
+            logType.put("avg_event_bytes", averageEventBytes);
             logType.put("calls", callObjects);
             logTypes.add(logType);
         }

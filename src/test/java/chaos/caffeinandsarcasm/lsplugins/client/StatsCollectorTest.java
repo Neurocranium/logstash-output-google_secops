@@ -38,11 +38,17 @@ public class StatsCollectorTest {
         assertEquals("PAN_FIREWALL", pan.get("name").getAsString());
         assertEquals(38, pan.get("events").getAsInt());
         assertEquals(37_990, pan.get("bytes").getAsLong());
+        assertEquals(1_000, pan.get("avg_event_bytes").getAsLong());
 
         JsonArray calls = pan.getAsJsonArray("calls");
         assertEquals(2, calls.size());
         assertCall(calls.get(0).getAsJsonObject(), 20, 20_000, 200, 80);
         assertCall(calls.get(1).getAsJsonObject(), 18, 17_990, 202, 54);
+
+        JsonObject fortinet = logTypes.get(1).getAsJsonObject();
+        assertEquals(1_024, fortinet.get("avg_event_bytes").getAsLong());
+        assertFalse(summary.has("avg_event_bytes"));
+        assertFalse(calls.get(0).getAsJsonObject().has("avg_event_bytes"));
 
         assertFalse(json.contains("\n"));
         assertFalse(json.contains("[google_secops]"));
@@ -73,6 +79,18 @@ public class StatsCollectorTest {
 
         StatsCollector empty = new StatsCollector(true);
         assertNull(empty.buildSummaryJson(Map.of("TYPE", items(1))));
+    }
+
+    @Test
+    public void reportsZeroAverageForZeroRecordedEvents() {
+        StatsCollector collector = new StatsCollector(true);
+        collector.recordCall("TYPE", 0, 0, 200, 1);
+
+        String json = collector.buildSummaryJson(Map.of("TYPE", items(0)));
+        JsonObject logType = JsonParser.parseString(json).getAsJsonObject()
+                .getAsJsonArray("log_types").get(0).getAsJsonObject();
+
+        assertEquals(0, logType.get("avg_event_bytes").getAsLong());
     }
 
     private static void assertCall(JsonObject call, int events, long bytes, int status, long durationMs) {
