@@ -1,3 +1,11 @@
+# 0.5.9
+- Redesign TLS endpoint selection to try full verification for both Chronicle
+  endpoints before using the opt-in restricted regional fallback
+- Restrict certificate fallback to the exact regional hostname and require a
+  leaf DNS SAN in the `googleapis.com` namespace
+- Extend cooldown probes to recover from restricted regional verification back
+  to a fully verified endpoint
+
 # 0.5.8
 - Add thread-safe, configurable batch sampling for statistics through
   `stats_sample_rate`; invalid rates warn and fall back to full sampling

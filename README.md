@@ -148,7 +148,7 @@ output {
 | `ssl_truststore_password` | string | no | `"changeit"` | Password used to load the custom truststore |
 | `ssl_truststore_type` | string | no | `"JKS"` | Java truststore type, such as `JKS` or `PKCS12` |
 | `ssl_ca_cert_path` | path | no | — | Path to a PEM file containing custom trusted CA certificates |
-| `ssl_verification_mode` | string | no | `"full"` | TLS verification mode: `full` verifies the certificate chain and hostname; `certificate` verifies only the certificate chain |
+| `ssl_verification_mode` | string | no | `"full"` | TLS verification mode: `full` requires full verification; `certificate` additionally permits the restricted regional fallback described below |
 
 Set `batch_size` greater than or equal to Logstash's `pipeline.batch.size` for
 the pipeline using this output plugin. If `batch_size` is lower, a large
@@ -170,10 +170,20 @@ If both `ssl_truststore_path` and `ssl_ca_cert_path` are configured, the Java
 truststore takes precedence.
 
 The default `ssl_verification_mode => "full"` validates both the certificate
-chain and the endpoint hostname. Use `ssl_verification_mode => "certificate"`
-only when the certificate is issued by a trusted CA but its subject alternative
-names do not cover the configured SecOps endpoint. Certificate mode continues
-to validate the certificate chain; it does not trust arbitrary certificates.
+chain and the endpoint hostname. The plugin always tries full verification for
+the preferred regional endpoint first and then for the global-routed regional
+endpoint. Use `ssl_verification_mode => "certificate"` only to opt into a final,
+restricted retry through the regional endpoint when both fully verified
+connections fail specifically because of hostname verification.
+
+Restricted regional verification continues to require a certificate chain
+trusted by the JVM or configured trust material. The leaf certificate must
+also contain at least one DNS subject alternative name in the `googleapis.com`
+namespace. The exception applies only to the exact configured
+`chronicle.<region>.rep.googleapis.com` hostname; the global-routed endpoint
+always uses full hostname verification. Expired, untrusted, revoked (when
+reported by the JVM's configured PKIX policy), or otherwise invalid certificate
+chains do not activate endpoint or restricted-verification fallback.
 
 ### Hostname verification errors
 
@@ -192,9 +202,12 @@ certificate genuinely lacks the required DNS name, configure:
 ssl_verification_mode => "certificate"
 ```
 
-This disables only hostname matching and produces a startup warning. Because it
-weakens endpoint identity verification, keep `full` mode wherever possible.
-It does not affect HTTP responses and cannot resolve `404 Not Found` errors.
+This enables the restricted fallback and produces a startup warning. It does
+not disable hostname verification for normal requests: the plugin first tries
+both documented endpoints with full verification. Because the final fallback
+authenticates the Google API namespace rather than the exact Chronicle service
+hostname, keep `full` mode wherever possible. This setting does not change HTTP
+response handling and cannot resolve `404 Not Found` errors.
 
 The plugin sends requests to the regional Chronicle ingestion endpoint:
 
@@ -294,6 +307,8 @@ behavior described above.
 |---|---|
 | **200-299** | Success |
 | **404 from preferred regional endpoint** | Immediately retry through `https://<region>-chronicle.googleapis.com`. If successful, use that endpoint and probe the preferred endpoint again after 1 hour, 24 hours, and 7 days. |
+| **Regional TLS hostname mismatch** | Retry the global-routed endpoint with full verification. If it also has a hostname mismatch and `ssl_verification_mode => "certificate"` is configured, retry the regional endpoint with restricted verification. |
+| **Other TLS certificate failure** | Do not switch endpoints or weaken verification. Apply normal IO retry handling. |
 | **429** | Read `Retry-After` header (default 300s). Block and wait once, retry. If still 429, log and drop. |
 | **400-499 (non-404/429)** | Log error and drop batch (fatal client error) |
 | **500-599** | Exponential backoff (1s, 2s, 4s) up to `max_retries`, then log and drop |
@@ -307,8 +322,12 @@ by all workers of that plugin instance. No timer thread is created: one worker
 opportunistically probes the preferred endpoint after 1 hour, then after 24
 hours and 7 days if routing remains unavailable. Any non-2xx response or IO
 failure during a probe is logged separately and the batch is retried through
-the known-working endpoint. After the third failed probe, the fallback remains
-active until the plugin restarts.
+the known-working endpoint. Restricted regional mode uses the same cooldown
+schedule, probing regional full verification followed by global full
+verification. It switches to the first fully verified endpoint that succeeds;
+if both still have hostname mismatches, it continues through restricted regional
+verification. After the third failed probe, the active fallback remains until
+the plugin restarts.
 
 ## Stats Collection
 

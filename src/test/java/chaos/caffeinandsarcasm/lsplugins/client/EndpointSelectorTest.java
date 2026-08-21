@@ -36,22 +36,25 @@ public class EndpointSelectorTest {
     public void progressesCooldownsThenUsesGlobalPermanently() {
         AtomicLong now = new AtomicLong();
         EndpointSelector selector = new EndpointSelector("europe-west3", now::get);
-        assertTrue(selector.activateGlobalAfterFallback());
+        assertTrue(selector.activateFallback(EndpointSelector.FallbackMode.GLOBAL_FULL));
         assertEquals(GLOBAL, selector.selectRoute().baseUrl());
 
         now.addAndGet(Duration.ofHours(1).toNanos());
         assertTrue(selector.selectRoute().isProbe());
-        EndpointSelector.ProbeFailure first = selector.preferredProbeFailed();
+        EndpointSelector.ProbeFailure first = selector.preferredProbeFailed(
+                EndpointSelector.FallbackMode.GLOBAL_FULL);
         assertEquals(Duration.ofHours(24), first.retryAfter());
 
         now.addAndGet(Duration.ofHours(24).toNanos());
         assertTrue(selector.selectRoute().isProbe());
-        EndpointSelector.ProbeFailure second = selector.preferredProbeFailed();
+        EndpointSelector.ProbeFailure second = selector.preferredProbeFailed(
+                EndpointSelector.FallbackMode.GLOBAL_FULL);
         assertEquals(Duration.ofDays(7), second.retryAfter());
 
         now.addAndGet(Duration.ofDays(7).toNanos());
         assertTrue(selector.selectRoute().isProbe());
-        assertTrue(selector.preferredProbeFailed().isPermanent());
+        assertTrue(selector.preferredProbeFailed(
+                EndpointSelector.FallbackMode.GLOBAL_FULL).isPermanent());
 
         now.addAndGet(Duration.ofDays(365).toNanos());
         EndpointSelector.Route permanent = selector.selectRoute();
@@ -63,14 +66,14 @@ public class EndpointSelectorTest {
     public void successfulProbeRestoresAndResetsRegionalEndpoint() {
         AtomicLong now = new AtomicLong();
         EndpointSelector selector = new EndpointSelector("europe-west3", now::get);
-        selector.activateGlobalAfterFallback();
+        selector.activateFallback(EndpointSelector.FallbackMode.GLOBAL_FULL);
         now.addAndGet(Duration.ofHours(1).toNanos());
 
         assertTrue(selector.selectRoute().isProbe());
         assertTrue(selector.preferredProbeSucceeded());
         assertEquals(REGIONAL, selector.selectRoute().baseUrl());
 
-        assertTrue(selector.activateGlobalAfterFallback());
+        assertTrue(selector.activateFallback(EndpointSelector.FallbackMode.GLOBAL_FULL));
         now.addAndGet(Duration.ofHours(1).toNanos());
         assertTrue(selector.selectRoute().isProbe());
     }
@@ -79,7 +82,7 @@ public class EndpointSelectorTest {
     public void onlyOneConcurrentWorkerAcquiresProbe() throws Exception {
         AtomicLong now = new AtomicLong();
         EndpointSelector selector = new EndpointSelector("europe-west3", now::get);
-        selector.activateGlobalAfterFallback();
+        selector.activateFallback(EndpointSelector.FallbackMode.GLOBAL_FULL);
         now.addAndGet(Duration.ofHours(1).toNanos());
 
         int workers = 8;
@@ -108,5 +111,43 @@ public class EndpointSelectorTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    public void restrictedRegionalFallbackUsesTheSameRecoveryCooldowns() {
+        AtomicLong now = new AtomicLong();
+        EndpointSelector selector = new EndpointSelector("europe-west3", now::get);
+        assertTrue(selector.activateFallback(EndpointSelector.FallbackMode.REGIONAL_RESTRICTED));
+
+        EndpointSelector.Route restricted = selector.selectRoute();
+        assertEquals(REGIONAL, restricted.baseUrl());
+        assertTrue(restricted.isRestrictedVerification());
+
+        now.addAndGet(Duration.ofHours(1).toNanos());
+        EndpointSelector.Route probe = selector.selectRoute();
+        assertTrue(probe.isProbe());
+        assertTrue(probe.isFullVerification());
+        assertTrue(probe.isRegional());
+        assertTrue(selector.fallbackRouteForProbe().isRestrictedVerification());
+
+        EndpointSelector.ProbeFailure first = selector.preferredProbeFailed(
+                EndpointSelector.FallbackMode.REGIONAL_RESTRICTED);
+        assertEquals(Duration.ofHours(24), first.retryAfter());
+        assertTrue(selector.selectRoute().isRestrictedVerification());
+    }
+
+    @Test
+    public void restrictedRecoveryCanSwitchToFullyVerifiedGlobalFallback() {
+        AtomicLong now = new AtomicLong();
+        EndpointSelector selector = new EndpointSelector("europe-west3", now::get);
+        selector.activateFallback(EndpointSelector.FallbackMode.REGIONAL_RESTRICTED);
+        now.addAndGet(Duration.ofHours(1).toNanos());
+        assertTrue(selector.selectRoute().isProbe());
+
+        selector.preferredProbeFailed(EndpointSelector.FallbackMode.GLOBAL_FULL);
+
+        EndpointSelector.Route route = selector.selectRoute();
+        assertEquals(GLOBAL, route.baseUrl());
+        assertTrue(route.isFullVerification());
     }
 }

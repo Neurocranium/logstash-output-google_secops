@@ -35,8 +35,12 @@ public class SecOpsApiClient implements AutoCloseable {
     private static final long[] BACKOFF_DELAYS_MS = {1000, 2000, 4000};
 
     private final Logger logger = LogManager.getLogger(SecOpsApiClient.class);
-    private final HttpTransport transport;
-    private final HttpRequestFactory requestFactory;
+    private final HttpTransport fullVerificationTransport;
+    private final HttpTransport restrictedRegionalTransport;
+    private final HttpRequestFactory fullVerificationRequestFactory;
+    private final HttpRequestFactory restrictedRegionalRequestFactory;
+    private final HostnameMismatchTracker hostnameMismatchTracker;
+    private final boolean restrictedRegionalFallbackEnabled;
     private final Gson gson;
     private final EndpointSelector endpointSelector;
     private final int batchSize;
@@ -52,28 +56,51 @@ public class SecOpsApiClient implements AutoCloseable {
                            String sslTruststorePath, String sslTruststorePassword,
                            String sslTruststoreType, String sslCaCertPath,
                            String sslVerificationMode) throws IOException {
-        NetHttpTransport.Builder transportBuilder = new NetHttpTransport.Builder();
-        if (sslTruststorePath != null && !sslTruststorePath.isEmpty()) {
-            configureTruststore(
-                    transportBuilder,
-                    sslTruststorePath, sslTruststorePassword, sslTruststoreType);
-        } else if (sslCaCertPath != null && !sslCaCertPath.isEmpty()) {
-            configureCaCert(transportBuilder, sslCaCertPath);
-        }
-        if ("certificate".equals(sslVerificationMode)) {
-            transportBuilder.setHostnameVerifier((hostname, session) -> true);
-            logger.warn("TLS certificate-only verification is enabled. Certificate chain trust will be validated, "
-                    + "but hostname identity will not be verified.");
-        }
-        this.transport = transportBuilder.build();
-        HttpCredentialsAdapter credentialsAdapter = new HttpCredentialsAdapter(credentials);
-        this.requestFactory = transport.createRequestFactory(credentialsAdapter);
-        this.gson = new Gson();
         this.endpointSelector = new EndpointSelector(region);
+        this.hostnameMismatchTracker = new HostnameMismatchTracker();
+        this.restrictedRegionalFallbackEnabled = "certificate".equals(sslVerificationMode);
+
+        NetHttpTransport.Builder fullTransportBuilder = createTransportBuilder(
+                sslTruststorePath, sslTruststorePassword, sslTruststoreType, sslCaCertPath);
+        fullTransportBuilder.setHostnameVerifier(hostnameMismatchTracker);
+        this.fullVerificationTransport = fullTransportBuilder.build();
+
+        HttpCredentialsAdapter credentialsAdapter = new HttpCredentialsAdapter(credentials);
+        this.fullVerificationRequestFactory =
+                fullVerificationTransport.createRequestFactory(credentialsAdapter);
+
+        if (restrictedRegionalFallbackEnabled) {
+            NetHttpTransport.Builder restrictedTransportBuilder = createTransportBuilder(
+                    sslTruststorePath, sslTruststorePassword, sslTruststoreType, sslCaCertPath);
+            restrictedTransportBuilder.setHostnameVerifier(
+                    new RegionalGoogleApisHostnameVerifier(endpointSelector.regionalHostname()));
+            this.restrictedRegionalTransport = restrictedTransportBuilder.build();
+            this.restrictedRegionalRequestFactory =
+                    restrictedRegionalTransport.createRequestFactory(credentialsAdapter);
+            logger.warn("Restricted regional TLS fallback is enabled. Full hostname verification will be tried for "
+                    + "both Chronicle endpoints first; the regional endpoint may then accept a chain-trusted leaf "
+                    + "certificate with a DNS SAN in the googleapis.com namespace.");
+        } else {
+            this.restrictedRegionalTransport = null;
+            this.restrictedRegionalRequestFactory = null;
+        }
+        this.gson = new Gson();
         this.batchSize = batchSize;
         this.maxRetries = maxRetries;
         this.forwarderId = forwarderId;
         this.sourceFilename = sourceFilename;
+    }
+
+    private static NetHttpTransport.Builder createTransportBuilder(
+            String sslTruststorePath, String sslTruststorePassword,
+            String sslTruststoreType, String sslCaCertPath) throws IOException {
+        NetHttpTransport.Builder builder = new NetHttpTransport.Builder();
+        if (sslTruststorePath != null && !sslTruststorePath.isEmpty()) {
+            configureTruststore(builder, sslTruststorePath, sslTruststorePassword, sslTruststoreType);
+        } else if (sslCaCertPath != null && !sslCaCertPath.isEmpty()) {
+            configureCaCert(builder, sslCaCertPath);
+        }
+        return builder;
     }
 
     public void importLogs(String parent, List<LogEntry> entries, StatsCollector stats) {
@@ -108,8 +135,13 @@ public class SecOpsApiClient implements AutoCloseable {
 
     private void sendWithRetry(String parent, List<LogEntry> batch, StatsCollector stats) {
         EndpointSelector.Route route = endpointSelector.selectRoute();
+        EndpointSelector.Route probeFallback = route.isProbe()
+                ? endpointSelector.fallbackRouteForProbe() : null;
+        boolean probing = route.isProbe();
         String url = buildImportUrl(route.baseUrl(), parent);
-        boolean activatingGlobalFallback = false;
+        TlsFallbackPlanner.Activation fallbackActivation = TlsFallbackPlanner.Activation.NONE;
+        TlsFallbackPlanner tlsFallbackPlanner = new TlsFallbackPlanner(
+                endpointSelector, restrictedRegionalFallbackEnabled);
         long startTime = System.currentTimeMillis();
         byte[] bodyBytes = buildRequestBody(batch);
 
@@ -119,13 +151,12 @@ public class SecOpsApiClient implements AutoCloseable {
                 return;
             }
             try {
-                HttpRequest request = buildPostRequest(url, bodyBytes);
-                HttpResponse response = request.execute();
+                HttpResponse response = executePostRequest(route, url, bodyBytes);
                 int statusCode = response.getStatusCode();
                 long durationMs = System.currentTimeMillis() - startTime;
 
                 if (statusCode >= 200 && statusCode < 300) {
-                    handleEndpointSuccess(route, activatingGlobalFallback);
+                    handleEndpointSuccess(route, probing, probeFallback, fallbackActivation);
                     stats.recordCall(resolveLogTypeFromLogs(batch),
                             batch.size(), bodyBytes.length, statusCode, durationMs);
                     response.ignore();
@@ -135,22 +166,26 @@ public class SecOpsApiClient implements AutoCloseable {
                 String responseBody = response.parseAsString();
                 response.disconnect();
 
-                if (route.isProbe()) {
-                    logProbeFailure(endpointSelector.preferredProbeFailed(), "HTTP " + statusCode);
-                    route = endpointSelector.globalRoute();
+                if (probing) {
+                    EndpointSelector.FallbackMode fallbackMode = fallbackModeFor(probeFallback);
+                    logProbeFailure(endpointSelector.preferredProbeFailed(fallbackMode),
+                            "HTTP " + statusCode);
+                    route = probeFallback;
                     url = buildImportUrl(route.baseUrl(), parent);
-                    activatingGlobalFallback = false;
+                    probing = false;
+                    fallbackActivation = TlsFallbackPlanner.Activation.NONE;
                     attempt = 0;
                     continue;
                 }
 
                 if (route.isRegional() && statusCode == 404) {
+                    tlsFallbackPlanner.recordRegionalHttp404();
                     logger.warn("Preferred regional Chronicle endpoint returned 404 for {}. Retrying this batch through "
                             + "the global-routed endpoint {}.",
-                            url, endpointSelector.globalRoute().baseUrl());
-                    route = endpointSelector.globalRoute();
+                            url, endpointSelector.globalFullRoute().baseUrl());
+                    route = endpointSelector.globalFullRoute();
                     url = buildImportUrl(route.baseUrl(), parent);
-                    activatingGlobalFallback = true;
+                    fallbackActivation = TlsFallbackPlanner.Activation.GLOBAL_FULL;
                     attempt = 0;
                     continue;
                 }
@@ -177,13 +212,12 @@ public class SecOpsApiClient implements AutoCloseable {
                         return;
                     }
 
-                    HttpRequest retryRequest = buildPostRequest(url, bodyBytes);
-                    HttpResponse retryResponse = retryRequest.execute();
+                    HttpResponse retryResponse = executePostRequest(route, url, bodyBytes);
                     int retryStatusCode = retryResponse.getStatusCode();
                     long retryDurationMs = System.currentTimeMillis() - startTime;
 
                     if (retryStatusCode >= 200 && retryStatusCode < 300) {
-                        handleEndpointSuccess(route, activatingGlobalFallback);
+                        handleEndpointSuccess(route, probing, probeFallback, fallbackActivation);
                         stats.recordCall(resolveLogTypeFromLogs(batch),
                                 batch.size(), bodyBytes.length, retryStatusCode, retryDurationMs);
                         retryResponse.disconnect();
@@ -230,13 +264,47 @@ public class SecOpsApiClient implements AutoCloseable {
 
                 attempt++;
 
+            } catch (HostnameMismatchIOException e) {
+                EndpointSelector.Route failedRoute = route;
+                TlsFallbackPlanner.Decision decision =
+                        tlsFallbackPlanner.afterHostnameMismatch(failedRoute);
+                if (decision.isTerminal()) {
+                    logTerminalHostnameMismatch(url, batch, bodyBytes, stats, startTime);
+                    return;
+                }
+                route = decision.route();
+                fallbackActivation = decision.activation();
+                if (route.isRestrictedVerification()) {
+                    if (probing) {
+                        logProbeFailure(endpointSelector.preferredProbeFailed(
+                                        EndpointSelector.FallbackMode.REGIONAL_RESTRICTED),
+                                "full hostname verification failed for both Chronicle endpoints");
+                        probing = false;
+                        fallbackActivation = TlsFallbackPlanner.Activation.NONE;
+                    }
+                    logger.warn("Full hostname verification failed for both Chronicle endpoints. Retrying this "
+                            + "batch through the regional endpoint with restricted certificate verification {}.",
+                            route.baseUrl());
+                } else if (failedRoute.isRegional()) {
+                    logger.warn("Full hostname verification failed for the regional Chronicle endpoint {}. "
+                            + "Retrying this batch through the fully verified global-routed endpoint {}.",
+                            url, route.baseUrl());
+                } else {
+                    logger.warn("Full hostname verification failed for the global-routed Chronicle endpoint {}. "
+                            + "Retrying this batch through the fully verified regional endpoint {}.",
+                            url, route.baseUrl());
+                }
+                url = buildImportUrl(route.baseUrl(), parent);
+                attempt = 0;
             } catch (SocketTimeoutException e) {
-                if (route.isProbe()) {
-                    logProbeFailure(endpointSelector.preferredProbeFailed(),
+                if (probing) {
+                    EndpointSelector.FallbackMode fallbackMode = fallbackModeFor(probeFallback);
+                    logProbeFailure(endpointSelector.preferredProbeFailed(fallbackMode),
                             "timeout: " + e.getMessage());
-                    route = endpointSelector.globalRoute();
+                    route = probeFallback;
                     url = buildImportUrl(route.baseUrl(), parent);
-                    activatingGlobalFallback = false;
+                    probing = false;
+                    fallbackActivation = TlsFallbackPlanner.Activation.NONE;
                     attempt = 0;
                     continue;
                 }
@@ -259,12 +327,14 @@ public class SecOpsApiClient implements AutoCloseable {
                     return;
                 }
             } catch (IOException e) {
-                if (route.isProbe()) {
-                    logProbeFailure(endpointSelector.preferredProbeFailed(),
+                if (probing) {
+                    EndpointSelector.FallbackMode fallbackMode = fallbackModeFor(probeFallback);
+                    logProbeFailure(endpointSelector.preferredProbeFailed(fallbackMode),
                             "IO error: " + e.getMessage());
-                    route = endpointSelector.globalRoute();
+                    route = probeFallback;
                     url = buildImportUrl(route.baseUrl(), parent);
-                    activatingGlobalFallback = false;
+                    probing = false;
+                    fallbackActivation = TlsFallbackPlanner.Activation.NONE;
                     attempt = 0;
                     continue;
                 }
@@ -294,29 +364,79 @@ public class SecOpsApiClient implements AutoCloseable {
         return baseUrl + "/" + parent + "/logs:import";
     }
 
-    private void handleEndpointSuccess(EndpointSelector.Route route, boolean activatingGlobalFallback) {
-        if (route.isProbe() && endpointSelector.preferredProbeSucceeded()) {
+    private void handleEndpointSuccess(EndpointSelector.Route route, boolean probing,
+                                       EndpointSelector.Route probeFallback,
+                                       TlsFallbackPlanner.Activation fallbackActivation) {
+        if (probing && route.isRegional() && route.isFullVerification()
+                && endpointSelector.preferredProbeSucceeded()) {
             logger.warn("Regional Chronicle endpoint routing is available again. Restoring preferred endpoint {}.",
                     route.baseUrl());
-        } else if (activatingGlobalFallback && endpointSelector.activateGlobalAfterFallback()) {
-            logger.warn("Regional Chronicle endpoint routing appears unstable. Using global-routed endpoint {} "
-                    + "after the preferred endpoint returned 404. The preferred endpoint will be probed again in 1 hour.",
-                    route.baseUrl());
+            return;
         }
+        if (probing && route.isGlobal()) {
+            boolean recoveredFromRestricted = probeFallback != null
+                    && probeFallback.isRestrictedVerification();
+            EndpointSelector.ProbeFailure failure = endpointSelector.preferredProbeFailed(
+                    EndpointSelector.FallbackMode.GLOBAL_FULL);
+            if (recoveredFromRestricted) {
+                if (failure.isPermanent()) {
+                    logger.warn("Full TLS verification succeeded through the global-routed Chronicle endpoint {}. "
+                            + "Leaving restricted regional verification; no further preferred regional endpoint "
+                            + "probes will be made for this plugin instance.", route.baseUrl());
+                } else {
+                    logger.warn("Full TLS verification succeeded through the global-routed Chronicle endpoint {}. "
+                            + "Leaving restricted regional verification; the preferred regional endpoint will be "
+                            + "probed again after {}.", route.baseUrl(), formatDuration(failure.retryAfter()));
+                }
+            } else {
+                logProbeFailure(failure, "regional full hostname verification remains unavailable");
+            }
+            return;
+        }
+        if (fallbackActivation == TlsFallbackPlanner.Activation.REGIONAL_FULL
+                && endpointSelector.restoreRegional()) {
+            logger.warn("Full TLS verification succeeded through the preferred regional Chronicle endpoint {}. "
+                    + "Restoring it as the active endpoint.", route.baseUrl());
+        } else if (fallbackActivation == TlsFallbackPlanner.Activation.GLOBAL_FULL
+                && endpointSelector.activateFallback(EndpointSelector.FallbackMode.GLOBAL_FULL)) {
+            logger.warn("Using fully verified global-routed Chronicle endpoint {}. The preferred regional endpoint "
+                    + "will be probed again in 1 hour.", route.baseUrl());
+        } else if (fallbackActivation == TlsFallbackPlanner.Activation.REGIONAL_RESTRICTED
+                && endpointSelector.activateFallback(EndpointSelector.FallbackMode.REGIONAL_RESTRICTED)) {
+            logger.warn("Using restricted certificate verification for regional Chronicle endpoint {}. Full "
+                    + "verification will be probed again in 1 hour.", route.baseUrl());
+        }
+    }
+
+    private static EndpointSelector.FallbackMode fallbackModeFor(EndpointSelector.Route route) {
+        return route != null && route.isRestrictedVerification()
+                ? EndpointSelector.FallbackMode.REGIONAL_RESTRICTED
+                : EndpointSelector.FallbackMode.GLOBAL_FULL;
+    }
+
+    private void logTerminalHostnameMismatch(String url, List<LogEntry> batch,
+                                             byte[] bodyBytes, StatsCollector stats,
+                                             long startTime) {
+        logger.warn("Full hostname verification failed for Chronicle endpoint {}. No permitted TLS fallback remains; "
+                + "dropping batch.", url);
+        stats.recordCall(resolveLogTypeFromLogs(batch), batch.size(), bodyBytes.length, 0,
+                System.currentTimeMillis() - startTime);
     }
 
     private void logProbeFailure(EndpointSelector.ProbeFailure failure, String reason) {
         if (!failure.isApplied()) {
             return;
         }
+        String activeEndpoint = failure.fallbackMode() == EndpointSelector.FallbackMode.REGIONAL_RESTRICTED
+                ? "the regional endpoint with restricted certificate verification"
+                : "the fully verified global-routed endpoint";
         if (failure.isPermanent()) {
-            logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
-                    + "the global-routed endpoint permanently for this plugin instance; no further probes will be made.",
-                    reason);
+            logger.warn("Cooldown probe of full Chronicle endpoint verification failed ({}). Continuing with {} "
+                    + "permanently for this plugin instance; no further probes will be made.", reason, activeEndpoint);
         } else {
-            logger.warn("Cooldown probe of the preferred regional Chronicle endpoint failed ({}). Continuing with "
-                    + "the global-routed endpoint; the next probe will run after {}.",
-                    reason, formatDuration(failure.retryAfter()));
+            logger.warn("Cooldown probe of full Chronicle endpoint verification failed ({}). Continuing with {}; "
+                    + "the next probe will run after {}.",
+                    reason, activeEndpoint, formatDuration(failure.retryAfter()));
         }
     }
 
@@ -327,8 +447,34 @@ public class SecOpsApiClient implements AutoCloseable {
         return duration.toHours() + (duration.toHours() == 1 ? " hour" : " hours");
     }
 
-    private HttpRequest buildPostRequest(String url, byte[] bodyBytes) throws IOException {
+    private HttpResponse executePostRequest(EndpointSelector.Route route, String url,
+                                            byte[] bodyBytes) throws IOException {
+        String hostname = new GenericUrl(url).getHost();
+        if (route.isFullVerification()) {
+            hostnameMismatchTracker.clear();
+        }
+        try {
+            return buildPostRequest(route, url, bodyBytes).execute();
+        } catch (IOException e) {
+            if (route.isFullVerification() && hostnameMismatchTracker.consumeMismatchFor(hostname)) {
+                throw new HostnameMismatchIOException(hostname, e);
+            }
+            throw e;
+        } finally {
+            if (route.isFullVerification()) {
+                hostnameMismatchTracker.clear();
+            }
+        }
+    }
+
+    private HttpRequest buildPostRequest(EndpointSelector.Route route, String url,
+                                         byte[] bodyBytes) throws IOException {
         ByteArrayContent content = new ByteArrayContent("application/json", bodyBytes);
+        HttpRequestFactory requestFactory = route.isRestrictedVerification()
+                ? restrictedRegionalRequestFactory : fullVerificationRequestFactory;
+        if (requestFactory == null) {
+            throw new IOException("Restricted regional TLS fallback is not enabled");
+        }
         HttpRequest request = requestFactory.buildPostRequest(new GenericUrl(url), content);
         request.setSuppressUserAgentSuffix(true);
         request.setReadTimeout(60000);
@@ -432,9 +578,22 @@ public class SecOpsApiClient implements AutoCloseable {
     @Override
     public void close() {
         try {
-            transport.shutdown();
+            fullVerificationTransport.shutdown();
         } catch (IOException e) {
-            logger.warn("Error shutting down HTTP transport: {}", e.getMessage());
+            logger.warn("Error shutting down full-verification HTTP transport: {}", e.getMessage());
+        }
+        if (restrictedRegionalTransport != null) {
+            try {
+                restrictedRegionalTransport.shutdown();
+            } catch (IOException e) {
+                logger.warn("Error shutting down restricted regional HTTP transport: {}", e.getMessage());
+            }
+        }
+    }
+
+    private static final class HostnameMismatchIOException extends IOException {
+        private HostnameMismatchIOException(String hostname, IOException cause) {
+            super("Hostname verification failed for " + hostname, cause);
         }
     }
 }
