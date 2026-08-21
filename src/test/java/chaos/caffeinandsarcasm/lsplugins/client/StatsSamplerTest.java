@@ -1,5 +1,7 @@
 package chaos.caffeinandsarcasm.lsplugins.client;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -17,11 +19,13 @@ import static org.junit.Assert.assertTrue;
 
 public class StatsSamplerTest {
 
+    private static final Logger TEST_LOGGER = LogManager.getLogger(StatsSamplerTest.class);
+
     @Test
     public void acceptsInclusiveRateRangeAndDefaultsInvalidValuesToFullSampling() {
-        new StatsSampler(true, 0.0);
-        new StatsSampler(true, 0.25);
-        new StatsSampler(true, 1.0);
+        new StatsSampler(true, 0.0, TEST_LOGGER);
+        new StatsSampler(true, 0.25, TEST_LOGGER);
+        new StatsSampler(true, 1.0, TEST_LOGGER);
 
         assertInvalidRateDefaultsToFullSampling(-0.01);
         assertInvalidRateDefaultsToFullSampling(1.01);
@@ -59,7 +63,7 @@ public class StatsSamplerTest {
 
     @Test
     public void productionSamplerSupportsConcurrentCalls() throws Exception {
-        StatsSampler sampler = new StatsSampler(true, 0.5);
+        StatsSampler sampler = new StatsSampler(true, 0.5, TEST_LOGGER);
         int workers = 8;
         int iterations = 10_000;
         ExecutorService executor = Executors.newFixedThreadPool(workers);

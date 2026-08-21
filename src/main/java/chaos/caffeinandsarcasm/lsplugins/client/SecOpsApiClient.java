@@ -10,7 +10,6 @@ import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.gson.Gson;
-import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import chaos.caffeinandsarcasm.lsplugins.LogEntry;
 
@@ -34,7 +33,7 @@ public class SecOpsApiClient implements AutoCloseable {
     private static final long SLEEP_POLL_INTERVAL_MS = 1000;
     private static final long[] BACKOFF_DELAYS_MS = {1000, 2000, 4000};
 
-    private final Logger logger = LogManager.getLogger(SecOpsApiClient.class);
+    private final Logger logger;
     private final HttpTransport fullVerificationTransport;
     private final HttpTransport restrictedRegionalTransport;
     private final HttpRequestFactory fullVerificationRequestFactory;
@@ -55,7 +54,8 @@ public class SecOpsApiClient implements AutoCloseable {
                            String forwarderId, String sourceFilename,
                            String sslTruststorePath, String sslTruststorePassword,
                            String sslTruststoreType, String sslCaCertPath,
-                           String sslVerificationMode) throws IOException {
+                           String sslVerificationMode, Logger logger) throws IOException {
+        this.logger = java.util.Objects.requireNonNull(logger, "logger");
         this.endpointSelector = new EndpointSelector(region);
         this.hostnameMismatchTracker = new HostnameMismatchTracker();
         this.restrictedRegionalFallbackEnabled = "certificate".equals(sslVerificationMode);

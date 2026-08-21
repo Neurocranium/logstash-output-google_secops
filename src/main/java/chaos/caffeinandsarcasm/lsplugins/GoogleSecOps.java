@@ -11,7 +11,6 @@ import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import chaos.caffeinandsarcasm.lsplugins.client.SecOpsApiClient;
 import chaos.caffeinandsarcasm.lsplugins.client.StatsCollector;
@@ -120,12 +119,13 @@ public class GoogleSecOps implements Output {
     private final int batchSize;
     private final StatsSampler statsSampler;
 
-    private final Logger logger = LogManager.getLogger(GoogleSecOps.class);
+    private final Logger logger;
     private final SecOpsApiClient client;
     private final CountDownLatch done = new CountDownLatch(1);
 
     public GoogleSecOps(final String id, final Configuration config, final Context context) {
         this.id = id;
+        this.logger = context.getLogger(this);
 
         this.projectId = config.get(PROJECT_ID_CONFIG);
         this.instanceId = config.get(INSTANCE_ID_CONFIG);
@@ -139,7 +139,7 @@ public class GoogleSecOps implements Output {
         this.labelsField = config.get(LABELS_FIELD_CONFIG);
         this.batchSize = config.get(BATCH_SIZE_CONFIG).intValue();
         this.statsSampler = new StatsSampler(
-                config.get(COLLECT_STATS_CONFIG), config.get(STATS_SAMPLE_RATE_CONFIG));
+                config.get(COLLECT_STATS_CONFIG), config.get(STATS_SAMPLE_RATE_CONFIG), logger);
 
         long maxRetries = config.get(MAX_RETRIES_CONFIG);
 
@@ -191,7 +191,8 @@ public class GoogleSecOps implements Output {
                     config.get(SSL_TRUSTSTORE_PASSWORD_CONFIG),
                     config.get(SSL_TRUSTSTORE_TYPE_CONFIG),
                     config.get(SSL_CA_CERT_PATH_CONFIG),
-                    sslVerificationMode);
+                    sslVerificationMode,
+                    logger);
 
         } catch (IOException e) {
             throw new RuntimeException(buildCredentialErrorMessage(e, saKeyPath), e);
@@ -260,7 +261,7 @@ public class GoogleSecOps implements Output {
 
     @Override
     public void output(final Collection<Event> events) {
-        StatsCollector stats = new StatsCollector(statsSampler.shouldCollect());
+        StatsCollector stats = new StatsCollector(statsSampler.shouldCollect(), logger);
 
         List<LogEntry> entries = new ArrayList<>(events.size());
         for (Event event : events) {

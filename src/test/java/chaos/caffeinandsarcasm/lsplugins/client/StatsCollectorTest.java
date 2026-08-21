@@ -3,6 +3,8 @@ package chaos.caffeinandsarcasm.lsplugins.client;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.junit.Test;
 
 import java.util.LinkedHashMap;
@@ -15,9 +17,11 @@ import static org.junit.Assert.assertNull;
 
 public class StatsCollectorTest {
 
+    private static final Logger TEST_LOGGER = LogManager.getLogger(StatsCollectorTest.class);
+
     @Test
     public void buildsCompactJsonWithAggregatesAndOrderedCalls() {
-        StatsCollector collector = new StatsCollector(true);
+        StatsCollector collector = new StatsCollector(true, TEST_LOGGER);
         collector.recordCall("PAN_FIREWALL", 20, 20_000, 200, 80);
         collector.recordCall("PAN_FIREWALL", 18, 17_990, 202, 54);
         collector.recordCall("FORTINET_FIREWALL", 19, 19_456, 200, 104);
@@ -57,7 +61,7 @@ public class StatsCollectorTest {
 
     @Test
     public void safelyEscapesLogTypeNames() {
-        StatsCollector collector = new StatsCollector(true);
+        StatsCollector collector = new StatsCollector(true, TEST_LOGGER);
         collector.recordCall("TYPE_\"A\\B\n", 1, 10, 200, 1);
 
         Map<String, List<?>> groups = new LinkedHashMap<>();
@@ -73,17 +77,17 @@ public class StatsCollectorTest {
 
     @Test
     public void suppressesDisabledOrEmptyStatistics() {
-        StatsCollector disabled = new StatsCollector(false);
+        StatsCollector disabled = new StatsCollector(false, TEST_LOGGER);
         disabled.recordCall("TYPE", 1, 10, 200, 1);
         assertNull(disabled.buildSummaryJson(Map.of("TYPE", items(1))));
 
-        StatsCollector empty = new StatsCollector(true);
+        StatsCollector empty = new StatsCollector(true, TEST_LOGGER);
         assertNull(empty.buildSummaryJson(Map.of("TYPE", items(1))));
     }
 
     @Test
     public void reportsZeroAverageForZeroRecordedEvents() {
-        StatsCollector collector = new StatsCollector(true);
+        StatsCollector collector = new StatsCollector(true, TEST_LOGGER);
         collector.recordCall("TYPE", 0, 0, 200, 1);
 
         String json = collector.buildSummaryJson(Map.of("TYPE", items(0)));

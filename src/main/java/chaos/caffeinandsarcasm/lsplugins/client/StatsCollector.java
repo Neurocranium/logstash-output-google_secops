@@ -1,7 +1,6 @@
 package chaos.caffeinandsarcasm.lsplugins.client;
 
 import com.google.gson.Gson;
-import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
@@ -13,12 +12,13 @@ public class StatsCollector {
 
     private static final Gson GSON = new Gson();
 
-    private final Logger logger = LogManager.getLogger(StatsCollector.class);
+    private final Logger logger;
     private final boolean enabled;
     private final List<ApiCallStat> calls = new ArrayList<>();
 
-    public StatsCollector(boolean enabled) {
+    public StatsCollector(boolean enabled, Logger logger) {
         this.enabled = enabled;
+        this.logger = java.util.Objects.requireNonNull(logger, "logger");
     }
 
     public void recordCall(String logType, int eventCount, long payloadBytes, int statusCode, long durationMs) {

@@ -1,6 +1,5 @@
 package chaos.caffeinandsarcasm.lsplugins.client;
 
-import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.Objects;
@@ -10,18 +9,17 @@ import java.util.function.DoubleSupplier;
 
 public final class StatsSampler {
 
-    private static final Logger LOGGER = LogManager.getLogger(StatsSampler.class);
-
     private final boolean enabled;
     private final double sampleRate;
     private final DoubleSupplier randomSource;
 
-    public StatsSampler(boolean enabled, double sampleRate) {
-        this(enabled, sampleRate, () -> ThreadLocalRandom.current().nextDouble(), message -> LOGGER.warn(message));
+    public StatsSampler(boolean enabled, double sampleRate, Logger logger) {
+        this(enabled, sampleRate, () -> ThreadLocalRandom.current().nextDouble(),
+                warningSink(logger));
     }
 
     StatsSampler(boolean enabled, double sampleRate, DoubleSupplier randomSource) {
-        this(enabled, sampleRate, randomSource, message -> LOGGER.warn(message));
+        this(enabled, sampleRate, randomSource, message -> { });
     }
 
     StatsSampler(boolean enabled, double sampleRate, DoubleSupplier randomSource, Consumer<String> warningSink) {
@@ -45,5 +43,10 @@ public final class StatsSampler {
             return true;
         }
         return randomSource.getAsDouble() < sampleRate;
+    }
+
+    private static Consumer<String> warningSink(Logger logger) {
+        Logger requiredLogger = Objects.requireNonNull(logger, "logger");
+        return requiredLogger::warn;
     }
 }
