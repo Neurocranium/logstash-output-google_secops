@@ -1,3 +1,7 @@
+# 0.5.8
+- Add thread-safe, configurable batch sampling for statistics through
+  `stats_sample_rate`; invalid rates warn and fall back to full sampling
+
 # 0.5.7
 - Add the rounded-up average event size in bytes to per-log-type batch statistics
 - Remove verbose HTTP response bodies from regional endpoint fallback and

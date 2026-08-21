@@ -110,6 +110,7 @@ output {
 
         # Stats Collection
         collect_stats          => true
+        stats_sample_rate      => 0.1
 
         # TLS (optional; use either a truststore or a PEM CA certificate)
         ssl_truststore_path     => "/etc/logstash/certs/truststore.jks"
@@ -142,6 +143,7 @@ output {
 | `batch_size` | number | no | `500` | Max log entries per API request (max 4 MB uncompressed) |
 | `max_retries` | number | no | `3` | Retries for 5xx and network errors (exponential backoff) |
 | `collect_stats` | boolean | no | `false` | Enable per-batch statistics |
+| `stats_sample_rate` | float | no | `1.0` | Probability from `0.0` to `1.0` that a Logstash batch is included in statistics |
 | `ssl_truststore_path` | path | no | — | Path to a Java truststore containing trusted CA certificates |
 | `ssl_truststore_password` | string | no | `"changeit"` | Password used to load the custom truststore |
 | `ssl_truststore_type` | string | no | `"JKS"` | Java truststore type, such as `JKS` or `PKCS12` |
@@ -311,8 +313,18 @@ active until the plugin restarts.
 ## Stats Collection
 
 When `collect_stats => true`, the plugin prints one compact JSON statistics
-object for every `output()` call. Payload sizes are exact byte counts, and each
-per-log-type average is rounded up to the next whole byte:
+object for sampled `output()` calls. `stats_sample_rate` controls the independent
+probability that each complete Logstash batch is sampled: `0.0` disables all
+statistics, `1.0` samples every batch, and intermediate values sample that
+proportion over time. Short-term sample counts can vary because each batch is
+selected independently. The setting has no effect when `collect_stats` is
+`false`. Values outside the inclusive `0.0` to `1.0` range emit a warning and
+fall back to `1.0`.
+
+Sampling is decided once per `output()` call. When selected, all log types and
+split SecOps API calls from that Logstash batch are included in its summary.
+Payload sizes are exact byte counts, and each per-log-type average is rounded up
+to the next whole byte:
 
 ```json
 {"events":57,"bytes":57446,"log_types":[{"name":"PAN_FIREWALL","events":38,"bytes":37990,"avg_event_bytes":1000,"calls":[{"events":38,"bytes":37990,"status":200,"duration_ms":134}]},{"name":"FORTINET_FIREWALL","events":19,"bytes":19456,"avg_event_bytes":1024,"calls":[{"events":19,"bytes":19456,"status":200,"duration_ms":104}]}]}

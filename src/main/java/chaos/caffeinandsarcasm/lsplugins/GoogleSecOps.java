@@ -15,6 +15,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import chaos.caffeinandsarcasm.lsplugins.client.SecOpsApiClient;
 import chaos.caffeinandsarcasm.lsplugins.client.StatsCollector;
+import chaos.caffeinandsarcasm.lsplugins.client.StatsSampler;
 
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -70,6 +71,8 @@ public class GoogleSecOps implements Output {
             PluginConfigSpec.numSetting("max_retries", 3L);
     static final PluginConfigSpec<Boolean> COLLECT_STATS_CONFIG =
             PluginConfigSpec.booleanSetting("collect_stats", false);
+    static final PluginConfigSpec<Double> STATS_SAMPLE_RATE_CONFIG =
+            PluginConfigSpec.floatSetting("stats_sample_rate", 1.0);
     static final PluginConfigSpec<String> SSL_TRUSTSTORE_PATH_CONFIG =
             PluginConfigSpec.stringSetting("ssl_truststore_path", "");
     static final PluginConfigSpec<String> SSL_TRUSTSTORE_PASSWORD_CONFIG =
@@ -115,7 +118,7 @@ public class GoogleSecOps implements Output {
     private final String collectionTimeField;
     private final String labelsField;
     private final int batchSize;
-    private final boolean collectStats;
+    private final StatsSampler statsSampler;
 
     private final Logger logger = LogManager.getLogger(GoogleSecOps.class);
     private final SecOpsApiClient client;
@@ -135,7 +138,8 @@ public class GoogleSecOps implements Output {
         this.collectionTimeField = config.get(COLLECTION_TIME_FIELD_CONFIG);
         this.labelsField = config.get(LABELS_FIELD_CONFIG);
         this.batchSize = config.get(BATCH_SIZE_CONFIG).intValue();
-        this.collectStats = config.get(COLLECT_STATS_CONFIG);
+        this.statsSampler = new StatsSampler(
+                config.get(COLLECT_STATS_CONFIG), config.get(STATS_SAMPLE_RATE_CONFIG));
 
         long maxRetries = config.get(MAX_RETRIES_CONFIG);
 
@@ -256,7 +260,7 @@ public class GoogleSecOps implements Output {
 
     @Override
     public void output(final Collection<Event> events) {
-        StatsCollector stats = new StatsCollector(collectStats);
+        StatsCollector stats = new StatsCollector(statsSampler.shouldCollect());
 
         List<LogEntry> entries = new ArrayList<>(events.size());
         for (Event event : events) {
@@ -407,6 +411,7 @@ public class GoogleSecOps implements Output {
                 DATA_FIELD_CONFIG, LOG_ENTRY_TIME_FIELD_CONFIG, COLLECTION_TIME_FIELD_CONFIG,
                 LABELS_FIELD_CONFIG, FORWARDER_ID_CONFIG, SOURCE_FILENAME_CONFIG,
                 SA_KEY_PATH_CONFIG, BATCH_SIZE_CONFIG, MAX_RETRIES_CONFIG, COLLECT_STATS_CONFIG,
+                STATS_SAMPLE_RATE_CONFIG,
                 SSL_TRUSTSTORE_PATH_CONFIG, SSL_TRUSTSTORE_PASSWORD_CONFIG,
                 SSL_TRUSTSTORE_TYPE_CONFIG, SSL_CA_CERT_PATH_CONFIG,
                 SSL_VERIFICATION_MODE_CONFIG);
