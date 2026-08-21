@@ -1,3 +1,13 @@
+# 0.5.10
+- Validate SecOps labels against the shallow `LogLabel` schema and drop malformed
+  events individually before serialization
+- Reject events whose collection timestamp precedes their log entry timestamp
+  without affecting valid events in the same Logstash batch
+- Enforce the SecOps log-type grammar (`[A-Z0-9_]+`) for configured, fallback,
+  and event-derived values before URL construction and operational logging
+- Route the restricted regional TLS startup notice through Logstash's standard
+  warning logger
+
 # 0.5.9
 - Redesign TLS endpoint selection to try full verification for both Chronicle
   endpoints before using the opt-in restricted regional fallback

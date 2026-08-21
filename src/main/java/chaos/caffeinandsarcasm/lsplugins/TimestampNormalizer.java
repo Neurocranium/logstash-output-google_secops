@@ -18,6 +18,11 @@ final class TimestampNormalizer {
     }
 
     static String normalize(Object value) {
+        Instant instant = toInstant(value);
+        return instant == null ? null : format(instant);
+    }
+
+    static Instant toInstant(Object value) {
         if (value == null) {
             return null;
         }
@@ -40,6 +45,10 @@ final class TimestampNormalizer {
         if (instant.isBefore(MIN_PROTOBUF_TIMESTAMP) || instant.isAfter(MAX_PROTOBUF_TIMESTAMP)) {
             throw new IllegalArgumentException("timestamp is outside the protobuf Timestamp range");
         }
+        return instant;
+    }
+
+    static String format(Instant instant) {
         return DateTimeFormatter.ISO_INSTANT.format(instant);
     }
 }

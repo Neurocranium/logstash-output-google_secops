@@ -49,12 +49,13 @@ Then build the plugin:
 ./gradlew gem
 ```
 
-This produces a `.gem` file in `build/` that can be installed into Logstash.
+This produces a `.gem` file in the project root that can be installed into
+Logstash.
 
 ### 3. Install the plugin
 
 ```bash
-/path/to/logstash/bin/logstash-plugin install --no-verify --local build/logstash-output-google_secops-1.0.0.gem
+/path/to/logstash/bin/logstash-plugin install --no-verify --local logstash-output-google_secops-0.5.10-java.gem
 ```
 
 ## Configuration
@@ -95,7 +96,7 @@ output {
         data_field             => "message"                     # field to send as log data
         log_entry_time_field   => "@timestamp"                  # field for log entry time
         collection_time_field  => "[event][created]"            # field for collection time
-        labels_field           => "[secops_labels]"             # optional, Map field for labels
+        labels_field           => "[secops_labels]"             # optional, SecOps LogLabel map
 
         # Forwarder metadata
         forwarder_id           => "my-forwarder"
@@ -136,7 +137,7 @@ output {
 | `data_field` | string | no | `"message"` | Event field whose value becomes the base64-encoded log data |
 | `log_entry_time_field` | string | no | `"@timestamp"` | Event field for the log entry timestamp (RFC 3339) |
 | `collection_time_field` | string | no | `"[event][created]"` | Event field for collection time. Falls back to `logEntryTime` value |
-| `labels_field` | string | no | — | Event field containing a key-value map for SecOps labels |
+| `labels_field` | string | no | — | Event field containing a map of SecOps `LogLabel` objects (see below) |
 | `forwarder_id` | string | no | — | Forwarder identifier sent in the API request |
 | `source_filename` | string | no | — | Source file name sent in the API request |
 | `service_account_key_path` | path | no | — | Path to a GCP service account JSON key. Omit to use ADC |
@@ -155,6 +156,32 @@ the pipeline using this output plugin. If `batch_size` is lower, a large
 Logstash pipeline batch may be split unexpectedly across multiple SecOps API
 calls. Requests that exceed the 4 MB uncompressed payload limit are still split
 regardless of these settings.
+
+### Labels
+
+When `labels_field` is configured, the referenced event field must follow the
+[Google SecOps `LogLabel` structure](https://docs.cloud.google.com/chronicle/docs/reference/rest/v1/projects.locations.instances.logTypes.logs).
+Each map key identifies a label. Its value must be an object with a string
+`value` and may contain a boolean `rbacEnabled`, which defaults to `false` when
+omitted:
+
+```json
+{
+  "secops_labels": {
+    "environment": {
+      "value": "production",
+      "rbacEnabled": true
+    },
+    "source": {
+      "value": "logstash"
+    }
+  }
+}
+```
+
+Events containing malformed labels are dropped individually. Other events in
+the same Logstash batch continue to be processed, and invalid-label counts are
+reported in a single warning for the batch.
 
 ## TLS Configuration
 
@@ -285,6 +312,12 @@ The plugin resolves the log type for each event as follows:
 
 Events with different log types are sent in separate API calls.
 
+Every configured or event-derived log type must contain one or more ASCII
+uppercase letters, digits, or underscores (`[A-Z0-9_]+`). Configured values are
+checked when the plugin starts. Events with non-empty dynamic values outside
+this grammar are dropped rather than routed through `fallback_log_type`, and a
+single warning reports the rejected event count for the Logstash batch.
+
 ## Timestamp Handling
 
 - `log_entry_time_field`: Defaults to `@timestamp`. Use any event field
@@ -299,7 +332,9 @@ offset timestamps are normalized to their equivalent UTC value ending in `Z`.
 An explicitly configured timestamp that is empty, malformed, lacks a timezone,
 or falls outside the protobuf Timestamp range is rejected locally: the plugin
 logs a warning and drops only that event. Missing values retain the fallback
-behavior described above.
+behavior described above. Events whose `collectionTime` is earlier than their
+`logEntryTime` are also dropped locally; reversed-timestamp counts are reported
+in a single warning for the Logstash batch.
 
 ## Retry Strategy
 
@@ -372,17 +407,32 @@ logstash-output-google_secops/
 ├── src/
 │   ├── main/java/chaos/caffeinandsarcasm/lsplugins/
 │   │   ├── GoogleSecOps.java                 # Main Logstash output plugin
+│   │   ├── LabelsValidator.java              # SecOps LogLabel schema validation
 │   │   ├── LogEntry.java                     # SecOps log entry model
+│   │   ├── LogLabel.java                     # SecOps label model
+│   │   ├── LogTypeValidator.java             # Log-type grammar validation
 │   │   ├── TimestampNormalizer.java          # RFC 3339 validation and UTC normalization
+│   │   ├── TimestampOrderValidator.java      # Cross-field timestamp ordering
 │   │   └── client/
 │   │       ├── EndpointSelector.java         # Regional fallback and cooldown state
+│   │       ├── HostnameMismatchTracker.java  # Thread-local TLS mismatch tracking
+│   │       ├── RegionalGoogleApisHostnameVerifier.java # Restricted regional verifier
 │   │       ├── SecOpsApiClient.java          # HTTP client, batching, and retries
-│   │       └── StatsCollector.java           # Compact JSON batch statistics
+│   │       ├── StatsCollector.java           # Compact JSON batch statistics
+│   │       ├── StatsSampler.java             # Thread-safe batch statistics sampling
+│   │       └── TlsFallbackPlanner.java       # Per-request TLS fallback sequence
 │   └── test/java/chaos/caffeinandsarcasm/lsplugins/
+│       ├── LabelsValidatorTest.java
+│       ├── LogTypeValidatorTest.java
 │       ├── TimestampNormalizerTest.java
+│       ├── TimestampOrderValidatorTest.java
 │       └── client/
 │           ├── EndpointSelectorTest.java
-│           └── StatsCollectorTest.java
+│           ├── HostnameMismatchTrackerTest.java
+│           ├── RegionalGoogleApisHostnameVerifierTest.java
+│           ├── StatsCollectorTest.java
+│           ├── StatsSamplerTest.java
+│           └── TlsFallbackPlannerTest.java
 ├── CHANGELOG.md
 ├── LICENSE
 ├── README.md
@@ -407,7 +457,7 @@ for instructions on building Logstash from source.
 ./gradlew gem
 ```
 
-The `.gem` file is written to `build/`.
+The `.gem` file is written to the project root.
 
 ### Testing
 

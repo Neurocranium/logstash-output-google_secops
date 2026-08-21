@@ -8,10 +8,10 @@ public class LogEntry {
     private final String logEntryTime;
     private final String collectionTime;
     private final String logType;
-    private final Map<String, Object> labels;
+    private final Map<String, LogLabel> labels;
 
     public LogEntry(String data, String logEntryTime, String collectionTime,
-                    String logType, Map<String, Object> labels) {
+                    String logType, Map<String, LogLabel> labels) {
         this.data = data;
         this.logEntryTime = logEntryTime;
         this.collectionTime = collectionTime;
@@ -35,7 +35,7 @@ public class LogEntry {
         return logType;
     }
 
-    public Map<String, Object> getLabels() {
+    public Map<String, LogLabel> getLabels() {
         return labels;
     }
 }

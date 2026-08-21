@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -154,6 +155,8 @@ public class GoogleSecOps implements Output {
         if (instanceId == null || instanceId.isEmpty()) {
             throw new IllegalArgumentException("'instance_id' is required");
         }
+        LogTypeValidator.requireValidConfiguration("log_type", logType, true);
+        LogTypeValidator.requireValidConfiguration("fallback_log_type", fallbackLogType, false);
         if (batchSize < 1 || batchSize > 5000) {
             throw new IllegalArgumentException(
                     "'batch_size' must be between 1 and 5000 (got " + batchSize + ")");
@@ -262,13 +265,35 @@ public class GoogleSecOps implements Output {
     @Override
     public void output(final Collection<Event> events) {
         StatsCollector stats = new StatsCollector(statsSampler.shouldCollect(), logger);
+        LabelsValidator.FailureSummary invalidLabels = new LabelsValidator.FailureSummary();
+        TimestampOrderValidator.FailureSummary reversedTimestamps =
+                new TimestampOrderValidator.FailureSummary();
+        LogTypeValidator.FailureSummary invalidLogTypes = new LogTypeValidator.FailureSummary();
 
         List<LogEntry> entries = new ArrayList<>(events.size());
         for (Event event : events) {
-            LogEntry entry = convertToLogEntry(event);
+            LogEntry entry = convertToLogEntry(event, invalidLabels, reversedTimestamps, invalidLogTypes);
             if (entry != null) {
                 entries.add(entry);
             }
+        }
+
+        if (!invalidLabels.isEmpty()) {
+            logger.warn("Dropped {} event(s) from this Logstash batch because labels field '{}' did not match the "
+                            + "Google SecOps LogLabel schema ({}). Each label must contain a string 'value', may "
+                            + "contain a boolean 'rbacEnabled', and must not contain other fields.",
+                    invalidLabels.total(), labelsField, invalidLabels.describe());
+        }
+        if (!reversedTimestamps.isEmpty()) {
+            logger.warn("Dropped {} event(s) from this Logstash batch because collection timestamp field '{}' "
+                            + "preceded log entry timestamp field '{}'. collectionTime must be equal to or later "
+                            + "than logEntryTime.",
+                    reversedTimestamps.total(), collectionTimeField, logEntryTimeField);
+        }
+        if (!invalidLogTypes.isEmpty()) {
+            logger.warn("Dropped {} event(s) from this Logstash batch because log type field '{}' contained values "
+                            + "outside the allowed alphabet [A-Z0-9_].",
+                    invalidLogTypes.total(), logTypeField);
         }
 
         Map<String, List<LogEntry>> groups = entries.stream()
@@ -289,18 +314,20 @@ public class GoogleSecOps implements Output {
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
     }
 
-    private LogEntry convertToLogEntry(Event event) {
+    private LogEntry convertToLogEntry(Event event, LabelsValidator.FailureSummary invalidLabels,
+                                       TimestampOrderValidator.FailureSummary reversedTimestamps,
+                                       LogTypeValidator.FailureSummary invalidLogTypes) {
         String data = extractData(event);
         if (data == null || data.isEmpty()) {
             return null;
         }
 
-        String logEntryTime;
-        String collectionTime;
+        Instant logEntryTime;
+        Instant collectionTime;
         try {
             logEntryTime = extractTimestamp(event, logEntryTimeField);
             if (logEntryTime == null) {
-                logEntryTime = normalizeTimestamp(event.getEventTimestamp(), "@timestamp");
+                logEntryTime = parseTimestamp(event.getEventTimestamp(), "@timestamp");
             }
             if (logEntryTime == null) {
                 logger.warn("Dropping event because neither '{}' nor the Logstash event timestamp contains a timestamp.",
@@ -319,11 +346,25 @@ public class GoogleSecOps implements Output {
             return null;
         }
 
+        if (!TimestampOrderValidator.isValid(logEntryTime, collectionTime)) {
+            reversedTimestamps.record();
+            return null;
+        }
+
         String resolvedLogType = resolveLogType(event);
+        if (resolvedLogType == null) {
+            invalidLogTypes.record();
+            return null;
+        }
 
-        Map<String, Object> labels = extractLabels(event);
+        LabelsValidator.ValidationResult labels = extractLabels(event);
+        if (!labels.isValid()) {
+            invalidLabels.record(labels.failure());
+            return null;
+        }
 
-        return new LogEntry(data, logEntryTime, collectionTime, resolvedLogType, labels);
+        return new LogEntry(data, TimestampNormalizer.format(logEntryTime),
+                TimestampNormalizer.format(collectionTime), resolvedLogType, labels.labels());
     }
 
     private String extractData(Event event) {
@@ -335,17 +376,17 @@ public class GoogleSecOps implements Output {
         return Base64.getEncoder().encodeToString(utf8Bytes);
     }
 
-    private String extractTimestamp(Event event, String field) {
+    private Instant extractTimestamp(Event event, String field) {
         if ("@timestamp".equals(field)) {
-            return normalizeTimestamp(event.getEventTimestamp(), field);
+            return parseTimestamp(event.getEventTimestamp(), field);
         }
         Object value = event.getField(field);
-        return normalizeTimestamp(value, field);
+        return parseTimestamp(value, field);
     }
 
-    private static String normalizeTimestamp(Object value, String field) {
+    private static Instant parseTimestamp(Object value, String field) {
         try {
-            return TimestampNormalizer.normalize(value);
+            return TimestampNormalizer.toInstant(value);
         } catch (IllegalArgumentException e) {
             throw new InvalidTimestampException(field, value, e);
         }
@@ -384,24 +425,14 @@ public class GoogleSecOps implements Output {
         if (logType != null && !logType.isEmpty()) {
             return logType;
         }
-        Object value = event.getField(logTypeField);
-        if (value != null && !value.toString().isEmpty()) {
-            return value.toString();
-        }
-        return fallbackLogType;
+        return LogTypeValidator.resolve("", event.getField(logTypeField), fallbackLogType);
     }
 
-    private Map<String, Object> extractLabels(Event event) {
+    private LabelsValidator.ValidationResult extractLabels(Event event) {
         if (labelsField == null || labelsField.isEmpty()) {
-            return null;
+            return LabelsValidator.validate(null);
         }
-        Object value = event.getField(labelsField);
-        if (value instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> labels = (Map<String, Object>) value;
-            return labels.isEmpty() ? null : labels;
-        }
-        return null;
+        return LabelsValidator.validate(event.getField(labelsField));
     }
 
     @Override
